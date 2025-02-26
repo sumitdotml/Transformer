@@ -2,7 +2,7 @@
 
 ## Project Commands
 - Run Python script: `python 0-encoding.py`
-- Run notebook: `jupyter notebook simplest_selfattn.ipynb`
+- Run notebook: `jupyter notebook 1-simplest_selfattn.ipynb` or just use IDEs like VSCode, Cursor, etc.
 - Install dependencies: `pip install -r requirements.txt`
 
 ## Code Style Guidelines
@@ -17,7 +17,7 @@
 - **Comments**: Include detailed explanation of mathematical operations
 
 ## Structure
-The repository implements transformer architecture components step-by-step:
+The repository implements transformer architecture components step-by-step (loosely speaking):
 1. Tokenization/embedding (0-encoding.py)
-2. Self-attention (simplest_selfattn.ipynb)
-3. Masked self-attention (simplest_masked_selfattn.ipynb)
+2. Self-attention (1-simplest_selfattn.ipynb)
+3. Masked self-attention (2-simplest_masked_selfattn.ipynb)
