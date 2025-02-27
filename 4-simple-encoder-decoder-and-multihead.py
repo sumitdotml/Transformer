@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class Attention(nn.Module):
-    def __init__(self, embed_dim=2, row_dim=0, col_dim=1):
+    def __init__(self, embed_dim=2, row_dim=0, col_dim=1) -> None:
         super().__init__()
         self.W_q = nn.Linear(in_features=embed_dim,
                              out_features=embed_dim, bias=False)
@@ -14,7 +14,7 @@ class Attention(nn.Module):
         self.row_dim = row_dim
         self.col_dim = col_dim
 
-    def forward(self, q_encodings, k_encodings, v_encodings, mask=None):
+    def forward(self, q_encodings, k_encodings, v_encodings, mask=None) -> torch.Tensor:
         q = self.W_q(q_encodings)
         k = self.W_k(k_encodings)
         v = self.W_v(v_encodings)
@@ -30,13 +30,13 @@ class Attention(nn.Module):
                 mask=mask, value=torch.tensor(float("-inf"))
             )
 
-        attn_percents = torch.softmax(input=scaled_sims, dim=-1)
-        attention = attn_percents @ v
+        attn_weights = torch.softmax(input=scaled_sims, dim=-1)
+        attention = attn_weights @ v
         return attention
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim=2, row_dim=0, col_dim=1, num_heads=1):
+    def __init__(self, embed_dim=2, row_dim=0, col_dim=1, num_heads=1) -> None:
         super().__init__()
         self.heads = nn.ModuleList(
             [Attention(embed_dim, row_dim, col_dim) for _ in range(num_heads)]
@@ -45,7 +45,7 @@ class MultiHeadAttention(nn.Module):
         self.row_dim = row_dim
         self.col_dim = col_dim
 
-    def forward(self, q_encodings, k_encodings, v_encodings, mask=None):
+    def forward(self, q_encodings, k_encodings, v_encodings, mask=None) -> torch.Tensor:
         return torch.cat(
             [
                 head(q_encodings, k_encodings, v_encodings, mask=mask)
@@ -111,17 +111,27 @@ Everything above was without the mask. Doing it with a mask from here.
 )
 
 # Creating a mask of same size as attention weights (which is q.shape[0] x k.shape[0])
-mask = torch.tril(torch.ones(q_encodings.shape[0], k_encodings.shape[0], dtype=torch.bool))
+mask = torch.tril(
+    torch.ones(q_encodings.shape[0], k_encodings.shape[0], dtype=torch.bool)
+)
 mask = ~mask  # Inverting to mask future positions (True values will be masked)
 print(f"Mask:\n{mask}")
 
 torch.manual_seed(42)
 
-attention_with_mask = Attention(row_dim=0, col_dim=1, embed_dim=3)
 
 # Creating a class that gives me access to attention weights for visualization
 class AttentionWithWeights(Attention):
-    def forward(self, q_encodings, k_encodings, v_encodings, mask=None):
+    """
+    This is exactly the same as the forward method in the Attention class,
+    except that it returns the attention weights in addition to the attention.
+
+    Only for properly visualizing the attention weights, no other purpose.
+    """
+
+    def forward(
+        self, q_encodings, k_encodings, v_encodings, mask=None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         q = self.W_q(q_encodings)
         k = self.W_k(k_encodings)
         v = self.W_v(v_encodings)
@@ -138,14 +148,18 @@ class AttentionWithWeights(Attention):
         attention = attn_weights @ v
         return attention, attn_weights
 
+
 # Storing results for comparison
 torch.manual_seed(42)
 unmasked_attn = AttentionWithWeights(row_dim=0, col_dim=1, embed_dim=3)
-unmasked_result, unmasked_weights = unmasked_attn(q_encodings, k_encodings, v_encodings)
+unmasked_result, unmasked_weights = unmasked_attn(
+    q_encodings, k_encodings, v_encodings)
 
 torch.manual_seed(42)
 masked_attn = AttentionWithWeights(row_dim=0, col_dim=1, embed_dim=3)
-masked_result, masked_weights = masked_attn(q_encodings, k_encodings, v_encodings, mask=mask)
+masked_result, masked_weights = masked_attn(
+    q_encodings, k_encodings, v_encodings, mask=mask
+)
 
 print(
     f"""========================================
