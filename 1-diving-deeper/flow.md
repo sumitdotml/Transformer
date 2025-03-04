@@ -11,7 +11,7 @@
     D[Feed Forward Network] --> E[Add & Norm]
     C[Add & Norm] --> E[Add & Norm]
     E[Add & Norm] --> F[Output Embeddings]
-    F[Output Embeddings] = Input to the decoder block
+    F[Output Embeddings] --> G[Decoder Block]
 ```
 
 ## Step-by-Step Process
