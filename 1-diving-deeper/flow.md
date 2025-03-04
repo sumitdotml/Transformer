@@ -3,6 +3,7 @@
 ## Data Flow Diagram
 
 ```mermaid
+    graph TD
     A[Input Embeddings + Positional Encoding] --> B[Multi-Head Self-Attention]
     B[Multi-Head Self-Attention] --> C[Add & Norm]
     A[Input Embeddings + Positional Encoding] --> C[Add & Norm]
@@ -18,6 +19,7 @@
 ### 1. Multi-Head Self-Attention
 
 ```mermaid
+    graph LR
     A[Input] --> B[Linear Projections]
     B[Linear Projections] --> C1[Head 1]
     B[Linear Projections] --> C2[Head 2]
@@ -40,6 +42,7 @@
 ### 2. First Add & Norm (Residual Connection + Layer Normalization for the output of the multi-head attention)
 
 ```mermaid
+    graph LR
     A[Attention Output] --> B[Add]
     C[Original Input] --> B[Add]
     B[Add] --> D[LayerNorm]
@@ -54,6 +57,7 @@ LayerNorm(x + Sublayer(x))
 ### 3. Position-wise Feed Forward Network
 
 ```mermaid
+    graph LR
     A[Input] --> B[Linear: d_model → d_ff]
     B[Linear: d_model → d_ff] --> C[ReLU]
     C --> D[Linear: d_ff → d_model]
@@ -65,6 +69,7 @@ LayerNorm(x + Sublayer(x))
 ### 4. Final Add & Norm (Residual Connection + Layer Normalization for the output of the FFN)
 
 ```mermaid
+    graph LR
     A[FFN Output] --> B[Add]
     C[Previous Output] --> B
     B --> D[LayerNorm]
