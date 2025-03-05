@@ -1,5 +1,8 @@
 # README
 
+> [!IMPORTANT]
+> Currently (re)watching Umar's video. 27:50 minute mark.
+
 # Table of Contents
 
 - [Links and resources I am using](#links-and-resources-i-am-using)
@@ -47,7 +50,6 @@ will be updated as I go along
 
 <img src="../assets/encoder-flow-diagram.png" alt="Transformer Encoder Block" width="600">
 
-
 ### Step-by-Step Process
 
 #### 1. Multi-Head Self-Attention
@@ -68,6 +70,7 @@ will be updated as I go along
 ```
 
 **Key Operations**:
+
 1. Split embedding into `num_heads` different subspaces
 2. Each head computes scaled dot-product attention independently
 3. Concatenate all head outputs
@@ -84,6 +87,7 @@ will be updated as I go along
 ```
 
 **Mathematically**:
+
 ```
 LayerNorm(x + Sublayer(x))
 ```
@@ -112,18 +116,19 @@ LayerNorm(x + Sublayer(x))
 
 ### Critical Properties Table
 
-| Property | Purpose | Implementation Note |
-|----------|---------|---------------------|
-| Residual Connections | Prevent vanishing gradients, enable deep networks | Simple element-wise addition |
-| Layer Normalization | Stabilize training, reduce sensitivity to initialization | Normalize across feature dimension |
-| Multi-Head Attention | Capture different types of relationships simultaneously | Parallel attention mechanisms |
-| Position-wise FFN | Add non-linearity and transformation capacity | Applied independently per position |
+| Property             | Purpose                                                  | Implementation Note                |
+| -------------------- | -------------------------------------------------------- | ---------------------------------- |
+| Residual Connections | Prevent vanishing gradients, enable deep networks        | Simple element-wise addition       |
+| Layer Normalization  | Stabilize training, reduce sensitivity to initialization | Normalize across feature dimension |
+| Multi-Head Attention | Capture different types of relationships simultaneously  | Parallel attention mechanisms      |
+| Position-wise FFN    | Add non-linearity and transformation capacity            | Applied independently per position |
 
 ### Concrete Example Walkthrough
 
 (for batch size=2, seq_len=4, d_model=512):
 
 1. **Multi-Head Attention**:
+
 ```zsh
 Input: [2,4,512] → Split into 8 heads → [2,8,4,64]
        ▼
@@ -133,25 +138,29 @@ Concatenate → [2,4,512] → Linear → [2,4,512]
 ```
 
 2. **Add & Norm**:
+
 ```zsh
-Original: [2,4,512]  
+Original: [2,4,512]
 Attention Output: [2,4,512]
 Add → [2,4,512] → LayerNorm → [2,4,512]
 ```
 
 3. **FFN**:
+
 ```zsh
 [2,4,512] → Linear → [2,4,2048] → ReLU → Linear → [2,4,512]
 ```
 
 4. **Final Add & Norm**:
+
 ```zsh
-FFN Output: [2,4,512]  
+FFN Output: [2,4,512]
 Previous: [2,4,512]
 Add → [2,4,512] → LayerNorm → Final Output
 ```
 
 **Code Mapping**:
+
 ```python
 # Full encoder block sequence:
 input = encoded_embeddings  # [2,4,512]
