@@ -34,13 +34,23 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         """
         Not writing this with the decoder in mind. Will edit accordingly
         later. I am assuming my input encoded tensor here has a shape of
-        [1, 4, 512]. So this is not a batch but rather a single input.
+        [1, 4, 512]. So this is not a batch but rather a single input (or
+        I can also say a batch of 1).
         """
         q = self.W_q(q_encodings)
         k = self.W_k(k_encodings)
         v = self.W_v(v_encodings)
 
-        return q, k, v
+        # transposing the last 2 dimensions of k since k is a 3D tensor
+        qk_T = q @ torch.transpose(k, -2, -1)
+        print("qk_T", qk_T.shape)  # [1, 4, 4]
+        attn_scores = qk_T / (k.shape[-1] ** 0.5)
+        print("attn_scores (qk_T / sqrt(d_k)):", attn_scores.shape)  # [1, 4, 4]
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        print("attn_weights", attn_weights.shape)  # [1, 4, 4]
+        context_vec = attn_weights @ v
+        print("Output (context_vec):", context_vec.shape)  # [1, 4, 512]
+        return context_vec
 
 
 mulhead = MultiHeadAttentionV2(num_heads=8, d_model=512, context_length=4)
