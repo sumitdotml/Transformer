@@ -16,19 +16,55 @@ print(q_encodings.shape, q_encodings)
 
 
 class MultiHeadAttentionV2(nn.Module):
-    def __init__(self, num_heads, d_model, context_length):
+    def __init__(self, num_heads:int, d_model:int, seq_length: int, dropout: float) -> None:
+        """
+        num_heads: Total number of heads for multihead attention
+        d_model: Dimension of the model (i.e., the size of the input embedding vector)
+        seq_length: Length of the sequence (i.e., the number of tokens in a given input text)
+        """
         super().__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
         assert (
             d_model % num_heads == 0
         ), f"""
 Model dim is not divisible by num_heads. Please ensure that
 the division is possible.
 Model dim: {d_model}, Number of heads: {num_heads}"""
-        self.num_heads = num_heads
-        self.d_model = d_model
+        
+        self.d_k = d_model // num_heads # d_k for multihead attn
+        """
+        d_k is the dimension of the key vector for each individual head.
+        It is obtained by splitting the d_model dimension into num_heads
+        equal parts.
+        If d_model = 512 and num_heads = 8, then d_k = 512 / 8 = 64.
+        """
+        
         self.W_q = nn.Linear(in_features=d_model, out_features=d_model)
+        """
+        Operation that is happening here: q_encodings -> W_q.
+        Shape: (seq_length, d_model) -> (seq_length, d_model)
+        """
+        
         self.W_k = nn.Linear(in_features=d_model, out_features=d_model)
+        """
+        Operation that is happening here: k_encodings -> W_k.
+        Shape: (seq_length, d_model) -> (seq_length, d_model)
+        """
+        
         self.W_v = nn.Linear(in_features=d_model, out_features=d_model)
+        """
+        Operation that is happening here: v_encodings -> W_v.
+        Shape: (seq_length, d_model) -> (seq_length, d_model)
+        """
+        
+        self.W_o = nn.Linear(in_features = num_heads * self.d_k, out_features = d_model)
+        """This is the `W_o` matrix that is used to project the concatenated
+        context vectors back to the model dimension.
+        Shape: (num_heads * d_k, d_model). Or simply (d_model, d_model).\n
+        The original paper uses the term d_v instead of d_k, but d_v is the
+        same as d_k.
+        """
 
     def forward(self, q_encodings, k_encodings, v_encodings) -> torch.Tensor:
         """
