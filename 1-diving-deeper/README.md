@@ -1,6 +1,6 @@
 # README
 
-## Table of Contents
+# Table of Contents
 
 - [Links and resources I am using](#links-and-resources-i-am-using)
 - [Concepts Covered](#concepts-covered)
@@ -9,7 +9,7 @@
 
 ---
 
-## Links and resources I am using <a href ='#links-and-resources-i-am-using'>
+# Links and resources I am using <a href ='#links-and-resources-i-am-using'>
 
 - [Attention is all you need explanation by Umar Jamil](https://www.youtube.com/watch?v=bCz4OMemCcA&t=1500s)
 - [Coding a Transformer from scratch by Umar Jamil](https://www.youtube.com/watch?v=ISNdQcPhsts)
@@ -19,17 +19,17 @@
 
 ---
 
-## Concepts Covered <a href ='#concepts-covered'>
+# Concepts Covered <a href ='#concepts-covered'>
 
 will be updated as I go along
 
 ---
 
-## Notes <a href ='#notes'>
+# Notes <a href ='#notes'>
 
-### Transformer Encoder Block Anatomy <a href ='#transformer-encoder-block-anatomy'>
+## Transformer Encoder Block Anatomy <a href ='#transformer-encoder-block-anatomy'>
 
-#### Data Flow Diagram
+### Data Flow Diagram
 
 ```mermaid
     graph TD
@@ -43,14 +43,14 @@ will be updated as I go along
     F[Output Embeddings] --> G[Decoder Block]
 ```
 
-#### Visualized Mathematical Flow
+### Visualized Mathematical Flow
 
 <img src="../assets/encoder-flow-diagram.png" alt="Transformer Encoder Block" width="600">
 
 
-#### Step-by-Step Process
+### Step-by-Step Process
 
-##### 1. Multi-Head Self-Attention
+#### 1. Multi-Head Self-Attention
 
 ```mermaid
     graph LR
@@ -73,7 +73,7 @@ will be updated as I go along
 3. Concatenate all head outputs
 4. Linear projection to original dimension
 
-##### 2. First Add & Norm (Residual Connection + Layer Normalization for the output of the multi-head attention)
+#### 2. First Add & Norm (Residual Connection + Layer Normalization for the output of the multi-head attention)
 
 ```mermaid
     graph LR
@@ -88,7 +88,7 @@ will be updated as I go along
 LayerNorm(x + Sublayer(x))
 ```
 
-##### 3. Position-wise Feed Forward Network
+#### 3. Position-wise Feed Forward Network
 
 ```mermaid
     graph LR
@@ -100,7 +100,7 @@ LayerNorm(x + Sublayer(x))
 **Dimension Example**:
 `512 → 2048 → 512`
 
-##### 4. Final Add & Norm (Residual Connection + Layer Normalization for the output of the FFN)
+#### 4. Final Add & Norm (Residual Connection + Layer Normalization for the output of the FFN)
 
 ```mermaid
     graph LR
@@ -110,7 +110,7 @@ LayerNorm(x + Sublayer(x))
     D --> E[Final Output]
 ```
 
-#### Critical Properties Table
+### Critical Properties Table
 
 | Property | Purpose | Implementation Note |
 |----------|---------|---------------------|
@@ -119,7 +119,7 @@ LayerNorm(x + Sublayer(x))
 | Multi-Head Attention | Capture different types of relationships simultaneously | Parallel attention mechanisms |
 | Position-wise FFN | Add non-linearity and transformation capacity | Applied independently per position |
 
-#### Concrete Example Walkthrough
+### Concrete Example Walkthrough
 
 (for batch size=2, seq_len=4, d_model=512):
 
