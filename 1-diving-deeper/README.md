@@ -24,7 +24,18 @@
 
 # Concepts Covered <a href ='#concepts-covered'>
 
-will be updated as I go along
+- [x] Tokenization with BPE (used tiktoken)
+- [x] Embedding and Positional Encoding (sine and cosine functions)
+- [x] Multi-Head Attention
+    - [x] W_q, W_k, W_v
+    - [x] q, k, v -> splitting into heads to get shape (batch, num_heads, seq_length, d_k)
+    - [x] attention weights and attention scores
+    - [x] concatenate split heads to get shape (batch, seq_length, d_model)
+- [ ] Feed Forward Network
+- [ ] Add & Norm
+- [ ] Residual Connection
+- [ ] Layer Normalization
+- [ ] Transformer Encoder Block
 
 ---
 

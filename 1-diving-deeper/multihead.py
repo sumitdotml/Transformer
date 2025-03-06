@@ -66,7 +66,7 @@ Model dim is not divisible by num_heads. Please ensure that
 the division is possible.
 Model dim: {d_model}, Number of heads: {num_heads}"""
 
-        self.d_k = d_model // num_heads  # d_k for multihead attn
+        self.d_k = d_model // num_heads
         """
         d_k is the dimension of the key vector for each individual head.
         It is obtained by splitting the d_model dimension into num_heads
@@ -121,8 +121,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
     def forward(self, q_encodings, k_encodings, v_encodings) -> torch.Tensor:
         """
-        Not writing this with the decoder in mind. Will edit accordingly
-        later. I am assuming my input encoded tensor here has a shape of
+        I am assuming my input encoded tensor here has a shape of
         [1, 4, 512]. So this is not a batch but rather a single input (or
         I can also say a batch of 1).
         """
@@ -138,70 +137,68 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         v = self.W_v(v_encodings)
         
         query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
-        """
-        Here, I split the q tensor with shape (batch, seq_length, d_model) into 
-        num_heads and then transposed the last 2 dimensions to get a shape of 
-        (batch, num_heads, seq_length, d_k).
+        # ========================== ↑ Query Tensor Reshape Logic ↑ ==========================
+        # Here, I split the q tensor with shape (batch, seq_length, d_model) into 
+        # num_heads and then transposed the last 2 dimensions to get a shape of 
+        # (batch, num_heads, seq_length, d_k).
 
-        In other words, the flow is:
-        (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
+        # In other words, the flow is:
+        # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
 
-        **Why is the transpose necessary?**
-        - If I use the logic of a simple self-attention, I know that the seq_length
-        and d_model are always the last 2 dimensions of the tensor.
-        - So, if I want to split the tensor into num_heads parts, I need to reverse the order
-        of num_heads and seq_length
-        - After the transpose, the shape of the tensor is 
-        (batch, num_heads, seq_length, d_k).
-        - Another reason is that the transpose operation brings the head
-        dimension to the front, which allows for easier computation of attention scores.
+        # **Why is the transpose necessary?**
+        # - If I use the logic of a simple self-attention, I know that the seq_length
+        # and d_model are always the last 2 dimensions of the tensor.
+        # - So, if I want to split the tensor into num_heads parts, I need to reverse the order
+        # of num_heads and seq_length
+        # - After the transpose, the shape of the tensor is 
+        # (batch, num_heads, seq_length, d_k).
+        # - Another reason is that the transpose operation brings the head
+        # dimension to the front, which allows for easier computation of attention scores.
 
-        This shape is obtained by:
-        - view: Splitting the tensor into num_heads parts.
-        - transpose: Transposing the last 2 dimensions to bring the head dimension
-        to the front.
-        """
+        # This shape is obtained by:
+        # - view: Splitting the tensor into num_heads parts.
+        # - transpose: Transposing the last 2 dimensions to bring the head dimension
+        # to the front.
+        # ========================== End of Query Tensor Reshape Logic ==========================
 
+        # Operation flow of the key tensor (same as the query tensor):
+        # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
         key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
-        """
-        Operation flow of the key tensor:
-        (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
-        """
 
+        # Operation flow of the value tensor (same as the query and key tensors):
+        # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
         value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
-        """
-        Operation flow of the value tensor:
-        (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
-        """
 
         print(
             f"\nq after splitting and transposing: {query.shape}"
             f"\nk after splitting and transposing: {key.shape} what"
             f"\nvalue after splitting and transposing: {value.shape}"
         )
-
+        
+        # shape of context_vec => (batch, num_heads, seq_length, d_k)
         context_vec, self.attn_weights = MultiHeadAttentionV2.self_attention(query=query, key=key, value=value, dropout=self.dropout, mask=True)
 
-        # Till this point, I have created 8 heads of query, key and value tensors.
-        # Each head has a shape of (batch, num_heads, seq_length, d_k).
+        # Till this point, I have created 8 heads of query, key and value tensors through `context_vec`.
 
         # I will now have to concatenate them together to get a single tensor H (meaning a concatenated head).
         # Ultimately, the shape of H will be (batch, seq_length, num_heads * d_k).
         # Or for every batch, I can think of it as (seq_length, num_heads * d_k). {num_heads * d_v is used in the paper,
         # but that is the same as num_heads * d_k}
 
-        H = context_vec.transpose(1, 2).contiguous().view(context_vec.shape[0], -1, self.d_k * self.num_heads)
-        """
-        Operation flow of the H tensor:
-        (batch, num_heads, seq_length, d_k) {transpose} -> (batch, seq_length, num_heads, d_k) {contiguous} -> (batch, seq_length, num_heads * d_k)
+        H = torch.transpose(context_vec, 1, 2).contiguous()
+        H = H.view(H.shape[0], -1, H.shape[-1] * H.shape[-2])
+        # ========================== ↑ H (concatenated head) Tensor Logic ↑ ==========================
+        # Operation flow of the H tensor:
+        # (batch, num_heads, seq_length, d_k) {transpose} -> (batch, seq_length, num_heads, d_k) {contiguous} -> (batch, seq_length, num_heads * d_k)
 
-        If context_vec's shape were (3, 8, 4, 64), its operation flow would be:
-        (3, 8, 4, 64) {transpose} -> (3, 4, 8, 64) {contiguous} -> (3, 4, 512)
+        # If context_vec's shape were (3, 8, 4, 64), its operation flow would be:
+        # (3, 8, 4, 64) {transpose} -> (3, 4, 8, 64) {contiguous} -> (3, 4, 512)
 
-        Note to self: the -1 in the view function is used to automatically calculate the size of the last dimension. I could've just written the exact size (1, 4, 512) as well, but what I am doing above is (batch, _, d_k * num_heads), which if the batch size were 1, d_k were 64 and num_heads were 8, would be (1, _, 512) => this is telling PyTorch to automatically calculate the size of the missing dimension. In other words, `-1` is almost like a placeholder.
-        """
+        # Note to self: the -1 in the view function is used to automatically calculate the size of the last dimension. I could've just written the exact size (1, 4, 512) as well, but what I am doing above is (batch, _, d_k * num_heads), which if the batch size were 1, d_k were 64 and num_heads were 8, would be (1, _, 512) => this is telling PyTorch to automatically calculate the size of the missing dimension. In other words, `-1` is almost like a placeholder.
+        # ========================== End of H (concatenated head) Tensor Logic ==========================
 
         print(f"Big H shape: {H.shape}")
+        return H.shape, H
 
         ### currently here!!!
 
@@ -210,7 +207,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 mulhead = MultiHeadAttentionV2(num_heads=8, d_model=512, seq_length=4)
 
 sample_mulhead = mulhead(q_encodings, k_encodings, v_encodings)
-# print(sample_mulhead)
+print(sample_mulhead)
 
 
 """
