@@ -198,7 +198,8 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # ========================== End of H (concatenated head) Tensor Logic ==========================
 
         print(f"Big H shape: {H.shape}")
-        return H.shape, H
+
+        return(self.W_o(H))
 
         ### currently here!!!
 
@@ -207,7 +208,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 mulhead = MultiHeadAttentionV2(num_heads=8, d_model=512, seq_length=4)
 
 sample_mulhead = mulhead(q_encodings, k_encodings, v_encodings)
-print(sample_mulhead)
+print(sample_mulhead.shape, sample_mulhead)
 
 
 """
