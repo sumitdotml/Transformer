@@ -1,7 +1,13 @@
+"""
+To the future me: There's some nice mental model I could make of the changes
+in the shape of the tensors in the multihead attention mechanism in the
+shape_study_notebook.ipynb file in the same directory as this file. Refer to
+that and everything should make sense.
+"""
+
 import torch
 import torch.nn as nn
 from imports import tokenize_text, positional_encoding
-import argparse
 
 input_text = "I like my coffee"
 torch.manual_seed(42)
@@ -13,7 +19,18 @@ q_encodings = positional_encoding(tokenized)
 k_encodings = positional_encoding(tokenized)
 v_encodings = positional_encoding(tokenized)
 
-print(q_encodings.shape, q_encodings)
+print(
+    f"\nq_encodings.shape: {q_encodings.shape}\nq_encodings: {
+      q_encodings.shape[0]}\n"
+)
+print(
+    f"k_encodings.shape: {k_encodings.shape}\nk_encodings: {
+      k_encodings.shape[0]}\n"
+)
+print(
+    f"v_encodings.shape: {v_encodings.shape}\nv_encodings: {
+      v_encodings.shape[0]}\n"
+)
 
 
 class MultiHeadAttentionV2(nn.Module):
@@ -21,8 +38,8 @@ class MultiHeadAttentionV2(nn.Module):
         self,
         num_heads: int,
         d_model: int,
-        seq_length: int,
-        dropout: None | float = None,
+        seq_length: int = 4,
+        dropout: float = 0.1,
     ) -> None:
         """
         num_heads: Total number of heads for multihead attention
@@ -65,14 +82,15 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
-        self.W_o = nn.Linear(in_features=num_heads *
-                             self.d_k, out_features=d_model)
+        self.W_o = nn.Linear(in_features=num_heads * self.d_k, out_features=d_model)
         """This is the `W_o` matrix that is used to project the concatenated
         context vectors back to the model dimension.
         Shape: (num_heads * d_k, d_model). Or simply (d_model, d_model).\n
         The original paper uses the term d_v instead of d_k, but d_v is the
         same as d_k.
         """
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, q_encodings, k_encodings, v_encodings) -> torch.Tensor:
         """
@@ -92,8 +110,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
 
-        query = q.view(q.shape[0], q.shape[1],
-                       self.num_heads, self.d_k).transpose(1, 2)
+        query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
         """
         Here, I split the q tensor with shape (batch, seq_length, d_model) into 
         num_heads and then transposed the last 2 dimensions to get a shape of 
@@ -107,56 +124,111 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         and d_model are always the last 2 dimensions of the tensor.
         - So, if I want to split the tensor into num_heads parts, I need to reverse the order
         of num_heads and seq_length
-        - After the transpose, the shape of the tensor is (batch, num_heads, seq_length, d_k).
-        - Another reason is that the transpose operation brings the head dimension to the front,
-        which allows for easier computation of attention scores.
+        - After the transpose, the shape of the tensor is 
+        (batch, num_heads, seq_length, d_k).
+        - Another reason is that the transpose operation brings the head
+        dimension to the front, which allows for easier computation of attention scores.
 
         This shape is obtained by:
         - view: Splitting the tensor into num_heads parts.
-        - transpose: Transposing the last 2 dimensions to bring the head dimension to the front.
+        - transpose: Transposing the last 2 dimensions to bring the head dimension
+        to the front.
         """
 
-        # transposing the last 2 dimensions of k since k is a 3D tensor
-        qk_T = query @ torch.transpose(k, -2, -1)
-        print("q @ k_T", qk_T.shape)  # [1, 4, 4]
-        attn_scores = qk_T / (k.shape[-1] ** 0.5)
-        print("attn_scores (q @ k_T / sqrt(d_k)):",
-              attn_scores.shape)  # [1, 4, 4]
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        print("attn_weights", attn_weights.shape)  # [1, 4, 4]
-        context_vec = attn_weights @ v
-        print("Output (context_vec):", context_vec.shape)  # [1, 4, 512]
-        return context_vec
+        key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        """
+        Operation flow of the key tensor:
+        (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
+        """
+
+        value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        """
+        Operation flow of the value tensor:
+        (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
+        """
+
+        print(
+            f"\nq after splitting and transposing: {query.shape}"
+            f"\nk after splitting and transposing: {key.shape} what"
+            f"\nvalue after splitting and transposing: {value.shape}"
+        )
+
+        @staticmethod
+        def self_attention(query, key, value, mask=False, dropout=None):
+            d_k = key.shape[-1]
+            attn_scores = (query @ torch.transpose(key, -2, -1)) / d_k**0.5
+            if mask:
+                mask = torch.unsqueeze(
+                    ~torch.tril(
+                        torch.ones(query.shape[-2], key.shape[-2], dtype=torch.bool)
+                    ),
+                    dim=0,
+                )
+                attn_scores = torch.masked_fill(
+                    attn_scores, mask=mask, value=torch.tensor(float("-inf"))
+                )
+
+            if dropout is not None:
+                attn_scores = self.dropout(attn_scores)
+
+            attn_weights = torch.softmax(attn_scores, dim=-1)
+            context_vec = attn_weights @ value
+            return context_vec, attn_weights
 
 
 mulhead = MultiHeadAttentionV2(num_heads=8, d_model=512, seq_length=4)
 
 sample_mulhead = mulhead(q_encodings, k_encodings, v_encodings)
-print(sample_mulhead)
+# print(sample_mulhead)
+
+
+"""
+Below are some functions that I created to understand the multihead attention mechanism better.
+Not related to the above code.
+"""
 
 
 def calculate_q_for_shape_understanding(batch_size=1, seq_length=4, d_model=512):
     """
-    To call this function from the command line, use the following command:
-    python multihead.py --d_model 512
-
     I say q here, but it's the same for k and v as well.
     I'm doing this to see how tensor shapes change from q_encodings -> q when
     doing self.W_q(q_encodings) in the MultiHeadAttention class.
     """
     q_encodings = torch.randn(batch_size, seq_length, d_model)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=batch_size)
-    parser.add_argument("--seq_length", type=int, default=seq_length)
-    parser.add_argument("--d_model", type=int, default=d_model)
-    parser.add_argument("--q_encodings", type=torch.Tensor,
-                        default=q_encodings)
-    args = parser.parse_args()
+
     # similar to the W_q I created with nn.Embedding in the MultiHeadAttention class
-    W_q = torch.randn(args.d_model, args.d_model)
-    result = args.q_encodings @ W_q
+    W_q = torch.randn(d_model, d_model)
+    result = q_encodings @ W_q
     print(
         "\n======================== Just experimenting with the W_q matrix =========================="
     )
     print(f"q_encodings @ W_q shape: {result.shape}\nresult: {result}\n")
     return result
+
+
+def masking_understanding(
+    query=torch.randn(1, 4, 512),
+    key=torch.randn(1, 4, 512),
+    value=torch.randn(1, 4, 512),
+    mask=True,
+):
+    d_k = key.shape[-1]
+    attn_scores = (query @ torch.transpose(key, -2, -1)) / d_k**0.5
+    if mask:
+        mask = torch.unsqueeze(
+            ~torch.tril(torch.ones(query.shape[-2], key.shape[-2], dtype=torch.bool)),
+            dim=0,
+        )
+        attn_scores = torch.masked_fill(
+            attn_scores, mask=mask, value=torch.tensor(float("-inf"))
+        )
+    print(
+        "=========================== Masking Understanding ==================================="
+    )
+    print(
+        f"attn_scores.shape: {
+          attn_scores.shape}\nattn_scores:\n{attn_scores}"
+    )
+    print(f"torch.softmax(attn_scores, dim=-1):\n{torch.softmax(attn_scores, dim=-1)}")
+    print(f"shape after softmax: {torch.softmax(attn_scores, dim=-1).shape}")
+    return attn_scores
