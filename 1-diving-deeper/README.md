@@ -1,7 +1,7 @@
 # README
 
 > [!IMPORTANT]
-> Currently (re)watching Umar's video. 39:57 minute mark.
+> Currently (re)watching Umar's video. 41:52 minute mark.
 
 # Table of Contents
 
