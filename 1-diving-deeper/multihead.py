@@ -32,6 +32,15 @@ print(
       v_encodings.shape[0]}\n"
 )
 
+def causal_mask(query, key):
+    if query.shape[-2] != key.shape[-2]:
+        raise ValueError("Query and key must have the same sequence length")
+    
+    mask = torch.unsqueeze(
+            ~torch.tril(torch.ones(query.shape[-2], key.shape[-2], dtype=torch.bool)),
+            dim=0,
+        )
+    return mask
 
 class MultiHeadAttentionV2(nn.Module):
     def __init__(
@@ -45,6 +54,7 @@ class MultiHeadAttentionV2(nn.Module):
         num_heads: Total number of heads for multihead attention
         d_model: Dimension of the model (i.e., the size of the input embedding vector)
         seq_length: Length of the sequence (i.e., the number of tokens in a given input text)
+        dropout: Dropout rate for the attention scores
         """
         super().__init__()
         self.num_heads = num_heads
@@ -92,6 +102,23 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
         self.dropout = nn.Dropout(dropout)
 
+    @staticmethod
+    def self_attention(query, key, value, dropout:nn.Dropout, mask= bool):
+        d_k = key.shape[-1]
+        attn_scores = (query @ torch.transpose(key, -2, -1)) / d_k**0.5
+        if mask == True:
+            masking = causal_mask(query, key)
+            attn_scores = torch.masked_fill(
+                attn_scores, mask=masking, value=torch.tensor(float("-inf"))
+            )
+
+        if dropout is not None:
+            attn_scores = dropout(attn_scores)
+
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        context_vec = attn_weights @ value
+        return context_vec, attn_weights
+
     def forward(self, q_encodings, k_encodings, v_encodings) -> torch.Tensor:
         """
         Not writing this with the decoder in mind. Will edit accordingly
@@ -109,7 +136,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
-
+        
         query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
         """
         Here, I split the q tensor with shape (batch, seq_length, d_model) into 
@@ -153,28 +180,32 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
             f"\nvalue after splitting and transposing: {value.shape}"
         )
 
-        @staticmethod
-        def self_attention(query, key, value, mask=False, dropout=None):
-            d_k = key.shape[-1]
-            attn_scores = (query @ torch.transpose(key, -2, -1)) / d_k**0.5
-            if mask:
-                mask = torch.unsqueeze(
-                    ~torch.tril(
-                        torch.ones(query.shape[-2], key.shape[-2], dtype=torch.bool)
-                    ),
-                    dim=0,
-                )
-                attn_scores = torch.masked_fill(
-                    attn_scores, mask=mask, value=torch.tensor(float("-inf"))
-                )
+        context_vec, self.attn_weights = MultiHeadAttentionV2.self_attention(query=query, key=key, value=value, dropout=self.dropout, mask=True)
 
-            if dropout is not None:
-                attn_scores = self.dropout(attn_scores)
+        # Till this point, I have created 8 heads of query, key and value tensors.
+        # Each head has a shape of (batch, num_heads, seq_length, d_k).
 
-            attn_weights = torch.softmax(attn_scores, dim=-1)
-            context_vec = attn_weights @ value
-            return context_vec, attn_weights
+        # I will now have to concatenate them together to get a single tensor H (meaning a concatenated head).
+        # Ultimately, the shape of H will be (batch, seq_length, num_heads * d_k).
+        # Or for every batch, I can think of it as (seq_length, num_heads * d_k). {num_heads * d_v is used in the paper,
+        # but that is the same as num_heads * d_k}
 
+        H = context_vec.transpose(1, 2).contiguous().view(context_vec.shape[0], -1, self.d_k * self.num_heads)
+        """
+        Operation flow of the H tensor:
+        (batch, num_heads, seq_length, d_k) {transpose} -> (batch, seq_length, num_heads, d_k) {contiguous} -> (batch, seq_length, num_heads * d_k)
+
+        If context_vec's shape were (3, 8, 4, 64), its operation flow would be:
+        (3, 8, 4, 64) {transpose} -> (3, 4, 8, 64) {contiguous} -> (3, 4, 512)
+
+        Note to self: the -1 in the view function is used to automatically calculate the size of the last dimension. I could've just written the exact size (1, 4, 512) as well, but what I am doing above is (batch, _, d_k * num_heads), which if the batch size were 1, d_k were 64 and num_heads were 8, would be (1, _, 512) => this is telling PyTorch to automatically calculate the size of the missing dimension. In other words, `-1` is almost like a placeholder.
+        """
+
+        print(f"Big H shape: {H.shape}")
+
+        ### currently here!!!
+
+        
 
 mulhead = MultiHeadAttentionV2(num_heads=8, d_model=512, seq_length=4)
 
