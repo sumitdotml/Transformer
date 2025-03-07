@@ -1,8 +1,5 @@
 # README
 
-> [!IMPORTANT]
-> Currently (re)watching Umar's video. 41:52 minute mark.
-
 # Table of Contents
 
 - [Links and resources I am using](#links-and-resources-i-am-using)
@@ -184,5 +181,5 @@ final_output = norm(norm1 + ffn_output)  # Step 4
 ---
 
 <p align="center">
-    <a href="#table-of-contents">Go to the top</a> | <a href="../0-intro/README.md">Go back to 0-intro</a>
+    <a href="#table-of-contents">Go to the top</a> | <a href="../0-intro/README.md">Go back to 0-intro</a> | <a href="../transformer/README.md">Go to the assembled transformer</a>
 </p>
