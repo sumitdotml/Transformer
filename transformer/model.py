@@ -1,147 +1,126 @@
+import tiktoken
 import torch
 import torch.nn as nn
 import math
 from typing import Optional
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+tokenizer = tiktoken.get_encoding("gpt2")
 
-class Transformer(nn.Module):
-    """
-    Transformer model.
+class Tokenizer:
+    def __init__(self, tokenizer: tiktoken.Encoding = tokenizer, device: torch.device = device):
+        self.tokenizer = tokenizer
+        self.vocab_size = tokenizer.n_vocab
+        self.device = device
 
-    Current args (incomplete):
-        vocab_size: integer, the size of the vocabulary of the tokenizer
-        d_model: integer, the dimension of the model
-        num_heads: integer, the number of attention heads
-        seq_length: integer, the length of the sequence (any input text length)
-        dropout: float, the dropout rate for the attention scores
-        causal_masking: boolean, whether to use causal masking
+    def encode(self, text: str) -> list[int]:
+        return self.tokenizer.encode(text)
 
-    Returns:
-        output: tensor, the output of the transformer model
-        shape: (batch_size, seq_length, d_model)
+    def decode(self, token_ids: list[int]) -> str:
+        return self.tokenizer.decode(token_ids)
+    
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        return [self.encode(text) for text in texts]
+    
+    def decode_batch(self, token_ids_list: list[list[int]]) -> list[str]:
+        return [self.decode(token_ids) for token_ids in token_ids_list]
 
-    To add:
-        Feed forward
-        Add & Norm
-        Residual connection
-    """
-    def __init__(self, config: dict):
+
+class InputEmbedding(nn.Module):
+    def __init__(self, d_model: int, device: torch.device = device):
         super().__init__()
-        self.config = config
-
-    def forward(self, input_text):
-        token_ids, embeddings = self.tokenize_text(input_text)
-        self.seq_length = len(token_ids)
-        q_encodings = self.positional_encoding(embeddings)
-        k_encodings = self.positional_encoding(embeddings)
-        v_encodings = self.positional_encoding(embeddings)
-        return self.multi_head_attention(q_encodings, k_encodings, v_encodings)
-    
-    def seq_length(self):
+        self.device = device
+        self.embedding = nn.Embedding(num_embeddings=Tokenizer().vocab_size, embedding_dim=d_model, device=device)
+        self.d_model = d_model
+        
+    def forward(self, input_text: str | list[str]) -> tuple[list[int], torch.Tensor]:
         """
-        Return the seq_length attribute if it exists, otherwise return None
-        """
-        return getattr(self, "seq_length", None)
-    
-    def vocab_size(self):
-        return self.config["vocab_size"]
-    
-    def tokenizer(self):
-        return self.config["tokenizer"]
-    
-    def d_model(self):
-        return self.config["d_model"]
-    
-    def num_heads(self):
-        return self.config["num_heads"]
-    
-    def dropout(self):
-        return self.config["dropout"]
-    
-    def causal_masking(self):
-        return self.config["causal_masking"]
-    
-    def create_causal_mask(self, seq_len_q: Optional[int] = None, seq_len_k: Optional[int] = None, device=None):
-        """
-        Create a causal mask for attention.
-
         Args:
-            seq_len_q: Query sequence length
-            seq_len_k: Key sequence length
-            device: Device to create mask on
+            input_text: string (for single string input) or list of strings (for batch input)
 
         Returns:
-            Boolean mask where True indicates positions to mask out
+            token_ids: list of integers, the token ids of the input text
+            embeddings: tensor, the embeddings of the input text
         """
-        if self.causal_masking():
-            mask = torch.ones(seq_len_q, seq_len_k, dtype=torch.bool, device=device)
-            mask = torch.triu(mask, diagonal=1)
-            return mask
-        else:
-            return None
-    
-    def embedding_matrix(self):
-        return nn.Embedding(num_embeddings=self.vocab_size(), embedding_dim=self.d_model())
-    
-    def tokenize_text(self, text):
-        token_ids = self.tokenizer().encode(text)
-        embeddings = self.embedding_matrix()(torch.stack([torch.tensor(token_ids)], dim=0))
-        return token_ids, embeddings
-    
-    def tokenize_batch(self, texts):
-        token_ids_list = [self.tokenizer().encode(text) for text in texts]
-        max_seq_len = max([len(token_ids) for token_ids in token_ids_list])
-        padded_token_ids = []
-        for ids in token_ids_list:
-            padded_ids = ids + [0] * (max_seq_len - len(ids))
-            padded_token_ids.append(padded_ids)
-        tokens_tensor = torch.tensor(padded_token_ids)
-        embeddings = self.embedding_matrix()(tokens_tensor)
-        return token_ids_list, embeddings
-    
-    def decode_text(self, token_ids):
-        return self.tokenizer().decode(token_ids)
-    
-    def decode_batch(self, token_ids_list):
-        return [self.decode_text(token_ids) for token_ids in token_ids_list]
-    
-    def positional_encoding_original_paper(self, input_embeddings):
-        batch, seq_len, d_model = input_embeddings.shape
-        device = input_embeddings.device
 
-        pos = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
-        dim = torch.arange(d_model, dtype=torch.float32, device=device)
+        assert isinstance(input_text, str) or isinstance(input_text, list), f"Input text must be a string (for single string input) or a list of strings (for batch input), received input type: {type(input_text)}"
+        
+        if isinstance(input_text, str):
+            token_ids = Tokenizer().encode(input_text)
+            embeddings = self.embedding(torch.stack([torch.tensor(token_ids, device=self.device)], dim=0))
+            embeddings = embeddings * math.sqrt(self.d_model)
+            return token_ids, embeddings
+        
+        elif isinstance(input_text, list):
+            token_ids_list = Tokenizer().encode_batch(input_text)
+            max_seq_len = max([len(token_ids) for token_ids in token_ids_list])
+            padded_token_ids_list = []
+            for token_ids in token_ids_list:
+                # basically, we're padding the token ids to the max sequence length by
+                # adding 0s to the end of the token ids list until it's the same length
+                # as the longest token ids list in the batch
+                padded_token_ids = token_ids + [0] * (max_seq_len - len(token_ids))
+                padded_token_ids_list.append(padded_token_ids)
+            embeddings_list = [self.embedding(torch.stack([torch.tensor(token_ids, device=self.device)], dim=0)) for token_ids in padded_token_ids_list]
+            embeddings_list = [embeddings * math.sqrt(self.d_model) for embeddings in embeddings_list]
+            return padded_token_ids_list, embeddings_list
+
+"""
+Original positional encoding from the paper. Just for reference.
+
+class PositionalEncodingOriginalPaper(nn.Module):
+    def __init__(self, device: Optional[torch.device] = device):
+        super().__init__()
+        self.device = device
+
+    def forward(self, input_embeddings):
+        batch, seq_len, d_model = input_embeddings.shape
+
+        pos = torch.arange(seq_len, dtype=torch.float32, device=self.device).unsqueeze(1)
+        dim = torch.arange(d_model, dtype=torch.float32, device=self.device)
 
         angle_rates = pos / (10000 ** (2 * dim / d_model))
         
-        pe = torch.zeros(seq_len, d_model, device=device)
+        pe = torch.zeros(seq_len, d_model, device=self.device)
         pe[:, 0::2] = torch.sin(angle_rates[:, 0::2])
         pe[:, 1::2] = torch.cos(angle_rates[:, 1::2])
 
         return pe.unsqueeze(0).expand(batch, -1, -1) + input_embeddings
-    
-    def positional_encoding(self, input_embeddings):
+"""
+
+class PositionalEncoding(nn.Module):
+    """
+    Positional encoding for the input embeddings.
+
+    Args:
+        device: Optional[torch.device], the device to run the positional encoding on
+        dropout: float, the dropout rate for the positional encoding
+    """
+
+    def __init__(self, dropout: float, device: torch.device = device):
+        super().__init__()
+        self.device = device
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, input_embeddings):
+        """
+        Currently works for single string input.
+
+        TODO:
+            - Make it work for batch input
+        """
         batch, seq_len, d_model = input_embeddings.shape
-        pos = torch.arange(seq_len).unsqueeze(1)
-        dim = torch.arange(d_model)
+        pos = torch.arange(seq_len, device=self.device).unsqueeze(1)
+        dim = torch.arange(d_model, device=self.device)
 
-        angle_rates = pos * torch.exp((-2 * dim * torch.log(torch.tensor(10000))) / d_model)
+        angle_rates = pos * torch.exp((-2 * dim * torch.log(torch.tensor(10000, device=self.device))) / d_model)
+
+        pe = torch.zeros(seq_len, d_model, device=self.device)
+        pe[:, 0::2] = torch.sin(angle_rates[:, 0::2])
+        pe[:, 1::2] = torch.cos(angle_rates[:, 1::2])
+
+        return self.dropout(pe.unsqueeze(0).expand(batch, -1, -1) + input_embeddings)
         
-        pe = torch.zeros(seq_len, d_model)
-        pe[:, 0::2] = torch.sin(angle_rates[:, 0::2]).requires_grad_(False)
-        pe[:, 1::2] = torch.cos(angle_rates[:, 1::2]).requires_grad_(False)
-
-        return pe.unsqueeze(0).expand(batch, -1, -1) + input_embeddings
-    
-    def multi_head_attention(self, q_encodings, k_encodings, v_encodings):
-        return MultiHeadAttention(
-            num_heads=self.num_heads(),
-            d_model=self.d_model(),
-            mask=self.create_causal_mask(self.seq_length, self.seq_length),
-            dropout=self.dropout(),
-        )(q_encodings, k_encodings, v_encodings)
-
 
 class MultiHeadAttention(nn.Module):
     def __init__(
@@ -150,6 +129,7 @@ class MultiHeadAttention(nn.Module):
         d_model: int,
         mask: torch.Tensor | None,
         dropout: float,
+        device: torch.device = device,
     ) -> None:
         """
         Args:
@@ -162,6 +142,7 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
+        self.device = device
         assert (
             d_model % num_heads == 0
         ), f"""
@@ -170,23 +151,23 @@ the division is possible.
 Model dim: {d_model}, Number of heads: {num_heads}"""
 
         self.d_k = d_model // num_heads
-        self.W_q = nn.Linear(in_features=d_model, out_features=d_model)
+        self.W_q = nn.Linear(in_features=d_model, out_features=d_model, device=device)
         """
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
-        self.W_k = nn.Linear(in_features=d_model, out_features=d_model)
+        self.W_k = nn.Linear(in_features=d_model, out_features=d_model, device=device)
         """
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
-        self.W_v = nn.Linear(in_features=d_model, out_features=d_model)
+        self.W_v = nn.Linear(in_features=d_model, out_features=d_model, device=device)
         """
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
         self.W_o = nn.Linear(in_features=num_heads *
-                             self.d_k, out_features=d_model)
+                             self.d_k, out_features=d_model, device=device)
         """
         Used to project the concatenated context vectors back to the model dimension.
         
@@ -199,9 +180,8 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod
-    def self_attention(query, key, value, dropout: nn.Dropout, mask=None, device=None):
+    def self_attention(query, key, value, dropout: nn.Dropout, mask=None, device: torch.device = device):
         _, _, _, d_k = query.shape
-        _, _, seq_len_k, _ = key.shape
         
         attn_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
         
@@ -213,10 +193,9 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
                 # From [1, seq_len_q, seq_len_k] to [1, 1, seq_len_q, seq_len_k]
                 mask = mask.unsqueeze(1)
                 
-            mask = mask.to(device)  # Ensure same device
+            mask = mask.to(device)
             attn_scores = attn_scores.masked_fill(mask, float("-inf"))
         
-        # Rest of the function (softmax, dropout, etc.)
         attn_weights = torch.softmax(attn_scores, dim=-1)
         if dropout is not None:
             attn_weights = dropout(attn_weights)
@@ -251,7 +230,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
             value=value,
             dropout=self.dropout,
             mask=self.mask,
-            device=device,
+            device=self.device,
         )
 
         H = torch.transpose(output, 1, 2).contiguous()
@@ -259,4 +238,120 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # ========================== ↑ H (concatenated head) Tensor Logic ↑ ==========================
         # (batch, num_heads, seq_length, d_k) {transpose} -> (batch, seq_length, num_heads, d_k) {contiguous} -> (batch, seq_length, num_heads * d_k)
 
-        return self.W_o(H)  
+        return self.W_o(H)
+
+class ResidualConnection(nn.Module):
+    """
+    TODO
+    """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def forward (self, x):
+        pass
+
+class LayerNorm(nn.Module):
+    """
+    TODO
+    """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x):
+        pass
+
+class FeedForward(nn.Module):
+    """
+    TODO
+    """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+    
+    def forward(self, x):
+        pass
+
+class Encoder(nn.Module):
+    """
+    Transformer encoder.
+
+    Current args (incomplete):
+        vocab_size: integer, the size of the vocabulary of the tokenizer
+        d_model: integer, the dimension of the model
+        num_heads: integer, the number of attention heads
+        seq_length: integer, the length of the sequence (any input text length)
+        dropout: float, the dropout rate for the attention scores
+        causal_masking: boolean, whether to use causal masking
+
+    Returns:
+        output: tensor, the output of the transformer encoder
+        shape: (batch_size, seq_length, d_model)
+
+    To add:
+        Feed forward
+        Add & Norm (LayerNorm)
+        Residual connection
+    """
+    def __init__(self, config: dict, device: torch.device = device):
+        super().__init__()
+        self.config = config
+        self.device = device
+
+        self.input_embedding = InputEmbedding(d_model=self.d_model(), device=self.device)
+        self.positional_encoding = PositionalEncoding(dropout=self.dropout(), device=self.device)
+
+    def forward(self, input_text):
+        token_ids, embeddings = self.input_embedding(input_text)
+        self.seq_length = len(token_ids)
+        q_encodings = self.positional_encoding(embeddings)
+        k_encodings = self.positional_encoding(embeddings)
+        v_encodings = self.positional_encoding(embeddings)
+        return self.multi_head_attention(q_encodings, k_encodings, v_encodings)
+    
+    def seq_length(self):
+        """
+        Return the seq_length attribute if it exists, otherwise return None
+        """
+        return getattr(self, "seq_length", None)
+    
+    def vocab_size(self):
+        return Tokenizer().vocab_size
+        
+    def d_model(self):
+        return self.config["d_model"]
+    
+    def num_heads(self):
+        return self.config["num_heads"]
+    
+    def dropout(self):
+        return self.config["dropout"]
+    
+    def causal_masking(self):
+        return self.config["causal_masking"]
+    
+    def create_causal_mask(self, seq_len_q: Optional[int] = None, seq_len_k: Optional[int] = None, device: Optional[torch.device] = device):
+        """
+        Create a causal mask for attention.
+
+        Args:
+            seq_len_q: Query sequence length
+            seq_len_k: Key sequence length
+            device: Device to create mask on
+
+        Returns:
+            Boolean mask where True indicates positions to mask out
+        """
+        if self.causal_masking():
+            mask = torch.ones(seq_len_q, seq_len_k, dtype=torch.bool, device=device)
+            mask = torch.triu(mask, diagonal=1)
+            return mask
+        else:
+            return None
+    
+    def multi_head_attention(self, q_encodings, k_encodings, v_encodings):
+        return MultiHeadAttention(
+            num_heads=self.num_heads(),
+            d_model=self.d_model(),
+            mask=self.create_causal_mask(self.seq_length, self.seq_length, self.device),
+            dropout=self.dropout(),
+            device=self.device,
+        )(q_encodings, k_encodings, v_encodings)
