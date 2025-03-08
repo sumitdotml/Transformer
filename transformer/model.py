@@ -129,8 +129,8 @@ class Transformer(nn.Module):
         angle_rates = pos * torch.exp((-2 * dim * torch.log(torch.tensor(10000))) / d_model)
         
         pe = torch.zeros(seq_len, d_model)
-        pe[:, 0::2] = torch.sin(angle_rates[:, 0::2])
-        pe[:, 1::2] = torch.cos(angle_rates[:, 1::2])
+        pe[:, 0::2] = torch.sin(angle_rates[:, 0::2]).requires_grad_(False)
+        pe[:, 1::2] = torch.cos(angle_rates[:, 1::2]).requires_grad_(False)
 
         return pe.unsqueeze(0).expand(batch, -1, -1) + input_embeddings
     
