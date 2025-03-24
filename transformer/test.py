@@ -13,8 +13,10 @@ encoder = Encoder(TRANSFORMER_CONFIG)
 
 output = encoder(input_text)
 
-print(f"\nEncoder's sequence length: {encoder.seq_length}")
-print(f"\nEncoder's vocab size: {encoder.vocab_size()}")
+print(f"\n======================================= Encoder =======================================")
+print(f"\nSequence length: {encoder.seq_length}")
+print(f"\nVocab size: {encoder.vocab_size()}")
+print(f"\nOutput shape: {output.shape}")
+print(f"Output:\n{output}\n")
 
-print(f"\nEncoder's output shape: {output.shape}")
-print(f"\nEncoder's output:\n{output}\n")
+print(f"=======================================================================================")

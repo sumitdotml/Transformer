@@ -270,12 +270,23 @@ class ResidualConnection(nn.Module):
 
     Mentioned in the original paper "Attention is All You Need" on
     page 3, section 3.1: "Encoder and Decoder Stacks"
+
+    Formula:
+    LayerNorm(x + Dropout(Sublayer(x)))
+
+    Note:
+        We are calling this class the "Residual Connection"; however, the output of this 
+        is comprised of two components:
+        
+            1. The residual connection (x + Dropout(Sublayer(x)))
+            2. The layer normalization (LayerNorm(residual_connection))
     """
 
-    def __init__(self, device: torch.device = device):
+    def __init__(self, droput: float, device: torch.device = device):
         super().__init__()
         self.device = device
         self.norm = LayerNorm()
+        self.dropout = nn.Dropout(droput)
 
     def forward(self, x: torch.Tensor, sublayer: nn.Module):
         """
@@ -286,11 +297,12 @@ class ResidualConnection(nn.Module):
 
         Returns:
             tensor, the output of the sublayer
-
-        Future consideration:
-            - Add dropout to the residual connection
         """
-        return x + self.norm(sublayer(x))
+        sublayer_output = sublayer(x)
+        dropped_output = self.dropout(sublayer_output)
+        residual_output = x + dropped_output
+        normalization = self.norm(residual_output) 
+        return normalization
 
 
 class LayerNorm(nn.Module):
