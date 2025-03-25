@@ -5,12 +5,9 @@ import torch.nn as nn
 class Attention(nn.Module):
     def __init__(self, embed_dim=2, row_dim=0, col_dim=1) -> None:
         super().__init__()
-        self.W_q = nn.Linear(in_features=embed_dim,
-                             out_features=embed_dim, bias=False)
-        self.W_k = nn.Linear(in_features=embed_dim,
-                             out_features=embed_dim, bias=False)
-        self.W_v = nn.Linear(in_features=embed_dim,
-                             out_features=embed_dim, bias=False)
+        self.W_q = nn.Linear(in_features=embed_dim, out_features=embed_dim, bias=False)
+        self.W_k = nn.Linear(in_features=embed_dim, out_features=embed_dim, bias=False)
+        self.W_v = nn.Linear(in_features=embed_dim, out_features=embed_dim, bias=False)
         self.row_dim = row_dim
         self.col_dim = col_dim
 
@@ -80,8 +77,7 @@ Self-attention (since each q, k, v is the same):
 
 torch.manual_seed(42)
 
-multihead_attention = MultiHeadAttention(
-    embed_dim=3, row_dim=0, col_dim=1, num_heads=1)
+multihead_attention = MultiHeadAttention(embed_dim=3, row_dim=0, col_dim=1, num_heads=1)
 
 print(
     f"""
@@ -152,8 +148,7 @@ class AttentionWithWeights(Attention):
 # Storing results for comparison
 torch.manual_seed(42)
 unmasked_attn = AttentionWithWeights(row_dim=0, col_dim=1, embed_dim=3)
-unmasked_result, unmasked_weights = unmasked_attn(
-    q_encodings, k_encodings, v_encodings)
+unmasked_result, unmasked_weights = unmasked_attn(q_encodings, k_encodings, v_encodings)
 
 torch.manual_seed(42)
 masked_attn = AttentionWithWeights(row_dim=0, col_dim=1, embed_dim=3)

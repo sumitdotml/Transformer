@@ -4,3 +4,4 @@ numpy
 matplotlib
 tiktoken
 tokenizers
+black==24.4.2

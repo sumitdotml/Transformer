@@ -5,10 +5,11 @@ shape_study_notebook.ipynb file in the same directory as this file. Refer to
 that and everything should make sense.
 """
 
+import math
+
 import torch
 import torch.nn as nn
-from imports import tokenize_text, positional_encoding
-import math
+from imports import positional_encoding, tokenize_text
 
 input_text = "I like my coffee"
 torch.manual_seed(42)
@@ -107,8 +108,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
-        self.W_o = nn.Linear(in_features=num_heads *
-                             self.d_k, out_features=d_model)
+        self.W_o = nn.Linear(in_features=num_heads * self.d_k, out_features=d_model)
         """This is the `W_o` matrix that is used to project the concatenated
         context vectors back to the model dimension.
         Shape: (num_heads * d_k, d_model). Or simply (d_model, d_model).\n
@@ -150,8 +150,7 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
 
-        query = q.view(q.shape[0], q.shape[1],
-                       self.num_heads, self.d_k).transpose(1, 2)
+        query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
         # ========================== ↑ Query Tensor Reshape Logic ↑ ==========================
         # Here, I split the q tensor with shape (batch, seq_length, d_model) into
         # num_heads and then transposed the last 2 dimensions to get a shape of
@@ -178,13 +177,11 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
         # Operation flow of the key tensor (same as the query tensor):
         # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
-        key = k.view(k.shape[0], k.shape[1],
-                     self.num_heads, self.d_k).transpose(1, 2)
+        key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
 
         # Operation flow of the value tensor (same as the query and key tensors):
         # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
-        value = v.view(v.shape[0], v.shape[1],
-                       self.num_heads, self.d_k).transpose(1, 2)
+        value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
 
         print(
             f"\nq after splitting and transposing: {query.shape}"
@@ -283,8 +280,7 @@ def masking_understanding(
     attn_scores = (query @ torch.transpose(key, -2, -1)) / d_k**0.5
     if mask:
         mask = torch.unsqueeze(
-            ~torch.tril(torch.ones(
-                query.shape[-2], key.shape[-2], dtype=torch.bool)),
+            ~torch.tril(torch.ones(query.shape[-2], key.shape[-2], dtype=torch.bool)),
             dim=0,
         )
         attn_scores = torch.masked_fill(
@@ -297,7 +293,6 @@ def masking_understanding(
         f"attn_scores.shape: {
             attn_scores.shape}\nattn_scores:\n{attn_scores}"
     )
-    print(
-        f"torch.softmax(attn_scores, dim=-1):\n{torch.softmax(attn_scores, dim=-1)}")
+    print(f"torch.softmax(attn_scores, dim=-1):\n{torch.softmax(attn_scores, dim=-1)}")
     print(f"shape after softmax: {torch.softmax(attn_scores, dim=-1).shape}")
     return attn_scores

@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > STATUS: IN PROGRESS
 >
-> CURRENTLY ON: [transformer](./transformer/). 
+> CURRENTLY ON: [transformer](./transformer/).
 
 ---
 

@@ -104,7 +104,7 @@ Concatenate → [2,4,512] → Linear → [2,4,512]
 
 2. **Add & Norm**:
 ```zsh
-Original: [2,4,512]  
+Original: [2,4,512]
 Attention Output: [2,4,512]
 Add → [2,4,512] → LayerNorm → [2,4,512]
 ```
@@ -116,7 +116,7 @@ Add → [2,4,512] → LayerNorm → [2,4,512]
 
 4. **Final Add & Norm**:
 ```zsh
-FFN Output: [2,4,512]  
+FFN Output: [2,4,512]
 Previous: [2,4,512]
 Add → [2,4,512] → LayerNorm → Final Output
 ```
@@ -130,7 +130,3 @@ norm1 = norm(input + attn_output)  # Step 2
 ffn_output = ffn(norm1)  # Step 3
 final_output = norm(norm1 + ffn_output)  # Step 4
 ```
-
-
-
-

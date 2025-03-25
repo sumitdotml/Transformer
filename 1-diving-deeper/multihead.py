@@ -4,10 +4,11 @@ the long comments and the print statements I used to understand the
 concepts.
 """
 
+import math
+
 import torch
 import torch.nn as nn
-from imports import tokenize_text, positional_encoding
-import math
+from imports import positional_encoding, tokenize_text
 
 input_text = "I like my coffee"
 torch.manual_seed(42)
@@ -43,7 +44,6 @@ class MultiHeadAttentionV2(nn.Module):
         num_heads: int,
         d_model: int,
         mask: torch.Tensor | None,
-        seq_length: int = 4,
         dropout: float = 0.1,
     ) -> None:
         """
@@ -80,11 +80,10 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         Shape: (seq_length, d_model) -> (seq_length, d_model)
         """
 
-        self.W_o = nn.Linear(in_features=num_heads *
-                             self.d_k, out_features=d_model)
+        self.W_o = nn.Linear(in_features=num_heads * self.d_k, out_features=d_model)
         """
         Used to project the concatenated context vectors back to the model dimension.
-        
+
         Shape: (num_heads * d_k, d_model). Or simply (d_model, d_model).
         The original paper uses the term d_v instead of d_k, but d_v is the
         same as d_k.
@@ -118,15 +117,12 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
 
-        query = q.view(q.shape[0], q.shape[1],
-                       self.num_heads, self.d_k).transpose(1, 2)
+        query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
         # ========================== ↑ Query Tensor Reshape Logic ↑ ==========================
         # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
 
-        key = k.view(k.shape[0], k.shape[1],
-                     self.num_heads, self.d_k).transpose(1, 2)
-        value = v.view(v.shape[0], v.shape[1],
-                       self.num_heads, self.d_k).transpose(1, 2)
+        key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
 
         # shape of output => (batch, num_heads, seq_length, d_k)
         output, self.attn_weights = MultiHeadAttentionV2.self_attention(

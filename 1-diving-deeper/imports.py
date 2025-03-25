@@ -1,6 +1,6 @@
+import tiktoken
 import torch
 import torch.nn as nn
-import tiktoken
 
 tokenizer = tiktoken.get_encoding("gpt2")
 

@@ -1,9 +1,10 @@
+import math
+from typing import Optional
+
 import tiktoken
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tokenizer = tiktoken.get_encoding("gpt2")
@@ -229,7 +230,14 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
         return output, attn_weights
 
-    def forward(self, q_encodings, k_encodings, v_encodings) -> torch.Tensor:
+    def forward(
+        self,
+        q_encodings: torch.Tensor,
+        k_encodings: torch.Tensor,
+        v_encodings: torch.Tensor,
+        mask=None,
+        device=device,
+    ) -> torch.Tensor:
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         q = self.W_q(q_encodings)
 
@@ -246,14 +254,17 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
         value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
 
+        # Use the passed mask if provided, otherwise use self.mask
+        mask_to_use = mask if mask is not None else self.mask
+
         # shape of output => (batch, num_heads, seq_length, d_k)
         output, self.attn_weights = MultiHeadAttention.self_attention(
             query=query,
             key=key,
             value=value,
             dropout=self.dropout,
-            mask=self.mask,
-            device=self.device,
+            mask=mask_to_use,
+            device=device,
         )
 
         H = torch.transpose(output, 1, 2).contiguous()
@@ -268,6 +279,16 @@ class ResidualConnection(nn.Module):
     """
     Residual connection for the encoder/decoder block.
 
+    Arguments:
+
+        Inputs:
+
+            1. x: tensor, the input to the residual connection
+            2. sublayer: the sublayer of the encoder/decoder block, i.e, either the multi-head attention mechanism or the feed-forward network.
+
+        Outputs:
+            1. tensor, the output of the residual connection
+
     Mentioned in the original paper "Attention is All You Need" on
     page 3, section 3.1: "Encoder and Decoder Stacks"
 
@@ -275,17 +296,17 @@ class ResidualConnection(nn.Module):
     LayerNorm(x + Dropout(Sublayer(x)))
 
     Note:
-        We are calling this class the "Residual Connection"; however, the output of this 
+        We are calling this class the "Residual Connection"; however, the output of this
         is comprised of two components:
-        
+
             1. The residual connection (x + Dropout(Sublayer(x)))
             2. The layer normalization (LayerNorm(residual_connection))
     """
 
-    def __init__(self, droput: float, device: torch.device = device):
+    def __init__(self, droput: float, d_model: int, device: torch.device = device):
         super().__init__()
         self.device = device
-        self.norm = LayerNorm()
+        self.norm = LayerNorm(d_model)
         self.dropout = nn.Dropout(droput)
 
     def forward(self, x: torch.Tensor, sublayer: nn.Module):
@@ -297,11 +318,22 @@ class ResidualConnection(nn.Module):
 
         Returns:
             tensor, the output of the sublayer
+
+        Note:
+            What I am doing here is the actual implementation based on the original paper.
+            However, it seems the more common implementation is to do the following:
+            ```
+            normalized = self.norm(x)
+            sublayer_output = sublayer(normalized)
+            dropped = self.dropout(sublayer_output)
+            return x + dropped
+            ```
+        This is probably what I will do in the future, but for now, I am sticking to the original implementation.
         """
-        sublayer_output = sublayer(x)
-        dropped_output = self.dropout(sublayer_output)
+        sublayer_instance = sublayer(x)
+        dropped_output = self.dropout(sublayer_instance)
         residual_output = x + dropped_output
-        normalization = self.norm(residual_output) 
+        normalization = self.norm(residual_output)
         return normalization
 
 
@@ -355,7 +387,7 @@ class LayerNorm(nn.Module):
         mean_x = torch.mean(x, dim=-1, keepdim=True)
         # unbiased = False means dividing by `n` and not `n-1`
         var_x = torch.var(x, dim=-1, keepdim=True, unbiased=False)
-        normalized_x = (x - mean_x) / math.sqrt(var_x + self.epsilon)
+        normalized_x = (x - mean_x) / torch.sqrt(var_x + self.epsilon)
         return self.gamma * normalized_x + self.beta
 
 
@@ -406,98 +438,163 @@ class FeedForward(nn.Module):
         return self.dropout(self.linear_2(F.relu(self.linear_1(x))))
 
 
-class Encoder(nn.Module):
+class EncoderBlock(nn.Module):
     """
-    Transformer encoder.
+    Transformer encoder block (individual unit in the encoder stack).
 
-    Current args (incomplete):
-        vocab_size: integer, the size of the vocabulary of the tokenizer
-        d_model: integer, the dimension of the model
-        num_heads: integer, the number of attention heads
-        seq_length: integer, the length of the sequence (any input text length)
-        dropout: float, the dropout rate for the attention scores
-        causal_masking: boolean, whether to use causal masking
+    This block processes already embedded inputs and applies:
+    1. Multi-head self-attention with residual connection and layer normalization
+    2. Feed-forward network with residual connection and layer normalization
 
-    Returns:
-        output: tensor, the output of the transformer encoder
-        shape: (batch_size, seq_length, d_model)
-
-    To add:
-        Feed forward
-        Add & Norm (LayerNorm)
-        Residual connection
+    It does NOT handle tokenization or embedding - that's the Encoder's job.
     """
 
-    def __init__(self, config: dict, device: torch.device = device):
+    def __init__(
+        self,
+        config: dict,
+        self_attn_block: MultiHeadAttention,
+        feed_forward_block: FeedForward,
+        device: torch.device = device,
+    ) -> None:
         super().__init__()
         self.config = config
         self.device = device
 
-        self.input_embedding = InputEmbedding(
-            d_model=self.d_model(), device=self.device
+        self.self_attn_block = self_attn_block
+        self.feed_forward_block = feed_forward_block
+        """
+        Here, `self_attn_block` and `feed_forward_block` are arguments to the
+        `__init__` method. This means that when I create an `Encoder` object
+        (e.g. `encoder = Encoder(config, self_attn_block, feed_forward_block, device)`),
+        I am required to provide pre-existing instances of `MultiHeadAttention`
+        and `FeedForward`. The `Encoder` class itself is not responsible for
+        creating these objects. It depends on them being created and passed
+        in from the outside. This is "dependency injection" - I am "injecting"
+        the dependencies (MultiHeadAttention, FeedForward) into the Encoder.
+        """
+
+        self.residual_connections = nn.ModuleList(
+            [
+                ResidualConnection(config["dropout"], config["d_model"], device=device)
+                for _ in range(2)
+            ]
         )
-        self.positional_encoding = PositionalEncoding(
-            dropout=self.dropout(), device=self.device
-        )
 
-    def forward(self, input_text):
-        token_ids, embeddings = self.input_embedding(input_text)
-        self.seq_length = len(token_ids)
-        q_encodings = self.positional_encoding(embeddings)
-        k_encodings = self.positional_encoding(embeddings)
-        v_encodings = self.positional_encoding(embeddings)
-        return self.multi_head_attention(q_encodings, k_encodings, v_encodings)
-
-    def seq_length(self):
+    def forward(self, x, mask=None):
         """
-        Return the seq_length attribute if it exists, otherwise return None
-        """
-        return getattr(self, "seq_length", None)
-
-    def vocab_size(self):
-        return Tokenizer().vocab_size
-
-    def d_model(self):
-        return self.config["d_model"]
-
-    def num_heads(self):
-        return self.config["num_heads"]
-
-    def dropout(self):
-        return self.config["dropout"]
-
-    def causal_masking(self):
-        return self.config["causal_masking"]
-
-    def create_causal_mask(
-        self,
-        seq_len_q: Optional[int] = None,
-        seq_len_k: Optional[int] = None,
-        device: Optional[torch.device] = device,
-    ):
-        """
-        Create a causal mask for attention.
+        Forward pass for the encoder block.
 
         Args:
-            seq_len_q: Query sequence length
-            seq_len_k: Key sequence length
-            device: Device to create mask on
+            x: Tensor of shape [batch_size, seq_length, d_model] - already embedded and position-encoded
+            mask: Optional mask for self-attention
 
         Returns:
-            Boolean mask where True indicates positions to mask out
+            Tensor of same shape as input
         """
-        if self.causal_masking():
+        # First connection: multi-head attention + layer norm + residual connection
+        attn_output = self.residual_connections[0](
+            x=x,
+            sublayer=lambda x_residual_input: self.self_attn_block(
+                x_residual_input,  # query
+                x_residual_input,  # key
+                x_residual_input,  # value
+                mask=mask,
+                device=self.device,
+            ),
+        )
+
+        # Second connection: feed-forward + layer norm + residual connection
+        ff_output = self.residual_connections[1](
+            x=attn_output,
+            sublayer=self.feed_forward_block,
+        )
+
+        return ff_output
+
+
+class Encoder(nn.Module):
+    def __init__(self, config: dict, n_layers=6, device: torch.device = device):
+        super().__init__()
+        self.config = config
+        self.device = device
+
+        # Input processing - only needed at Encoder level
+        self.input_embedding = InputEmbedding(d_model=config["d_model"], device=device)
+        self.positional_encoding = PositionalEncoding(
+            dropout=config["dropout"], device=device
+        )
+
+        # Create n_layers encoder blocks
+        self.layers = nn.ModuleList(
+            [self._create_encoder_block() for _ in range(n_layers)]
+        )
+
+        self._seq_length = None
+
+    def _create_encoder_block(self):
+        # Helper method to create an encoder block with all its components
+        self_attn = MultiHeadAttention(
+            num_heads=self.config["num_heads"],
+            d_model=self.config["d_model"],
+            mask=None,
+            dropout=self.config["dropout"],
+            device=self.device,
+        )
+
+        feed_forward = FeedForward(
+            d_model=self.config["d_model"],
+            d_ff=self.config.get("d_ff", 2048),  # Default to 2048 if not specified
+            dropout=self.config["dropout"],
+            device=self.device,
+        )
+
+        return EncoderBlock(
+            config=self.config,
+            self_attn_block=self_attn,
+            feed_forward_block=feed_forward,
+            device=self.device,
+        )
+
+    def forward(self, input_text, masking: bool = False):
+        # Process input text to get embeddings
+        token_ids, embeddings = self.input_embedding(input_text)
+        self._seq_length = len(token_ids)
+
+        # Add positional encoding
+        x = self.positional_encoding(embeddings)
+
+        # Create mask if needed
+        mask = (
+            self.create_causal_mask(self._seq_length, self._seq_length)
+            if masking
+            else None
+        )
+
+        # Pass through each encoder block
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        # output of the last encoder block
+        return x
+
+    # Utility methods should only be in Encoder
+    @property
+    def seq_length(self):
+        return self._seq_length
+
+    def vocab_size(self) -> int:
+        return Tokenizer().vocab_size
+
+    def create_causal_mask(
+        self, seq_len_q, seq_len_k, device: torch.device = None
+    ) -> torch.Tensor | None:
+        """Create a causal mask for attention."""
+        device = device or self.device
+        # Check for both "masking" and "causal_masking" for backward compatibility
+        if self.config.get("masking", False) or self.config.get(
+            "causal_masking", False
+        ):
             mask = torch.ones(seq_len_q, seq_len_k, dtype=torch.bool, device=device)
             mask = torch.triu(mask, diagonal=1)
             return mask
-        else:
-            return None
-
-    def multi_head_attention(self, q_encodings, k_encodings, v_encodings):
-        return MultiHeadAttention(
-            num_heads=self.num_heads(),
-            d_model=self.d_model(),
-            mask=self.create_causal_mask(self.seq_length, self.seq_length, self.device),
-            dropout=self.dropout(),
-            device=self.device,
-        )(q_encodings, k_encodings, v_encodings)
+        return None
