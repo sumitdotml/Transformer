@@ -10,9 +10,11 @@ This directory contains the code for the Transformer model.
 ## TODO: Original Paper Replication
 
 - [x] Multi-head attention with encoded embeddings
-- [ ] Feed forward
-- [ ] Add & Norm
-- [ ] Residual connection
+- [x] Feed forward
+- [x] Add & Norm
+- [x] Residual connection
+- [x] Encoder
+- [ ] Decoder
 - [ ] Connection between encoder and decoder
 - [ ] Create a working architecture with a simple string as input
 - [ ] Expand the architecture to work with batches

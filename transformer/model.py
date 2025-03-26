@@ -1,88 +1,116 @@
-import math
-from typing import Optional
 
-import tiktoken
+import math
+from typing import Optional, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = tiktoken.get_encoding("gpt2")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+from transformers import AutoTokenizer, PreTrainedTokenizerFast # Import from transformers
 
-
-class Tokenizer:
-    def __init__(
-        self, tokenizer: tiktoken.Encoding = tokenizer, device: torch.device = device
-    ):
-        self.tokenizer = tokenizer
-        self.vocab_size = tokenizer.n_vocab
-        self.device = device
-
-    def encode(self, text: str) -> list[int]:
-        return self.tokenizer.encode(text)
-
-    def decode(self, token_ids: list[int]) -> str:
-        return self.tokenizer.decode(token_ids)
-
-    def encode_batch(self, texts: list[str]) -> list[list[int]]:
-        return [self.encode(text) for text in texts]
-
-    def decode_batch(self, token_ids_list: list[list[int]]) -> list[str]:
-        return [self.decode(token_ids) for token_ids in token_ids_list]
+DEFAULT_TOKENIZER_NAME = "bert-base-uncased"
 
 
 class InputEmbedding(nn.Module):
-    def __init__(self, d_model: int, device: torch.device = device):
+    def __init__(self, d_model: int, 
+                 tokenizer_name: str,
+                 device: torch.device = device,
+                 max_length:Optional[int] = None):
         super().__init__()
-        self.device = device
-        self.embedding = nn.Embedding(
-            num_embeddings=Tokenizer().vocab_size, embedding_dim=d_model, device=device
-        )
         self.d_model = d_model
+        self.device = device
+        self.max_length = max_length # Store max_length
 
-    def forward(self, input_text: str | list[str]) -> tuple[list[int], torch.Tensor]:
+        # Load the tokenizer
+        # Using PreTrainedTokenizerFast for type hinting, common base class
+        self.tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(tokenizer_name)
+        
+        # --- Handle Padding Token ---
+        if self.tokenizer.pad_token is None:
+            print(f"Warning: Tokenizer '{tokenizer_name}' does not have a default pad token. Adding '[PAD]'.")
+            # Common practice: add a pad token if missing, often EOS token is used if available
+            # For simplicity here, adding a generic '[PAD]' token.
+            # Might need to resize model embeddings if adding tokens to a pre-trained model.
+            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            # NOTE: If I were fine-tuning a pre-trained model, I'd also need to resize
+            # the model's token embeddings matrix: model.resize_token_embeddings(len(tokenizer))
+
+        self.padding_token_id = self.tokenizer.pad_token_id
+        self.vocab_size = self.tokenizer.vocab_size # Get vocab size from HF tokenizer
+
+        print(f"InputEmbedding: Loaded Tokenizer '{tokenizer_name}'")
+        print(f"InputEmbedding: Vocab Size = {self.vocab_size}, Padding ID = {self.padding_token_id}")
+
+        # Initialize the embedding layer
+        self.embedding = nn.Embedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=d_model,
+            padding_idx=self.padding_token_id, # Inform nn.Embedding about the padding index
+            device=device
+        )
+
+
+    def forward(self, input_texts: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
+        Processes a batch of input strings into embeddings and a padding mask.
+
         Args:
-            input_text: string (for single string input) or
-            list of strings (for batch input)
+            input_texts (List[str]): A list of strings to be processed.
 
         Returns:
-            token_ids: list of integers, the token ids of the input text
-            embeddings: tensor, the embeddings of the input text
+            Tuple[torch.Tensor, torch.Tensor]:
+                - embeddings (torch.Tensor): A tensor of shape
+                  (batch_size, seq_len, d_model) containing the scaled embeddings.
+                  `seq_len` is `max_length` if provided, otherwise the length
+                  of the longest sequence in the batch.
+                - padding_mask (torch.Tensor): A boolean tensor of shape
+                  (batch_size, 1, 1, seq_len) where True indicates a position
+                  that should be masked (padding). Suitable for attention mechanisms.
         """
+        assert isinstance(input_texts, list), "Input must be a list of strings."
+        print(f"InputEmbedding: Received {len(input_texts)} strings.")
 
-        assert isinstance(input_text, str) or isinstance(
-            input_text, list
-        ), f"Input text must be a string (for single string input) or a list of strings (for batch input), received input type: {type(input_text)}"
+        # 1. Tokenize the batch using the Hugging Face tokenizer
+        # This handles tokenization, adding special tokens, padding, truncation,
+        # and tensor conversion in one go.
+        tokenizer_args = {
+            'text': input_texts,
+            'add_special_tokens': True, # Add [CLS], [SEP] etc. (depends on tokenizer type)
+            'padding': 'longest' if self.max_length is None else 'max_length', # Pad to longest in batch or to max_length
+            'truncation': self.max_length is not None, # Truncate if max_length is specified
+            'max_length': self.max_length, # Set max_length if provided
+            'return_tensors': 'pt', # Return PyTorch tensors
+            'return_attention_mask': True # Get the attention mask
+        }
+        encoding = self.tokenizer(**tokenizer_args).to(self.device)
 
-        if isinstance(input_text, str):
-            token_ids = Tokenizer().encode(input_text)
-            embeddings = self.embedding(
-                torch.stack([torch.tensor(token_ids, device=self.device)], dim=0)
-            )
-            embeddings = embeddings * math.sqrt(self.d_model)
-            return token_ids, embeddings
+        input_ids_tensor = encoding['input_ids'] # Shape: (batch_size, seq_len)
+        attention_mask_tensor = encoding['attention_mask'] # Shape: (batch_size, seq_len), 1 for real, 0 for padding
 
-        elif isinstance(input_text, list):
-            token_ids_list = Tokenizer().encode_batch(input_text)
-            max_seq_len = max([len(token_ids) for token_ids in token_ids_list])
-            padded_token_ids_list = []
-            for token_ids in token_ids_list:
-                # basically, we're padding the token ids to the max sequence length by
-                # adding 0s to the end of the token ids list until it's the same length
-                # as the longest token ids list in the batch
-                padded_token_ids = token_ids + [0] * (max_seq_len - len(token_ids))
-                padded_token_ids_list.append(padded_token_ids)
-            embeddings_list = [
-                self.embedding(
-                    torch.stack([torch.tensor(token_ids, device=self.device)], dim=0)
-                )
-                for token_ids in padded_token_ids_list
-            ]
-            embeddings_list = [
-                embeddings * math.sqrt(self.d_model) for embeddings in embeddings_list
-            ]
-            return padded_token_ids_list, embeddings_list
+        current_seq_len = input_ids_tensor.shape[1]
+        print(f"InputEmbedding: Tokenized IDs tensor shape = {input_ids_tensor.shape}")
+        print(f"InputEmbedding: Attention mask tensor shape = {attention_mask_tensor.shape}")
+
+
+        # 2. Create padding mask for attention mechanism
+        # I'll need mask to be True where attention should be inhibited (padding tokens)
+        # The attention_mask is 0 for padding, 1 for non-padding.
+        # So, I'll create the mask where attention_mask == 0.
+        # Shape: (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
+        padding_mask = (attention_mask_tensor == 0).unsqueeze(1).unsqueeze(2)
+        print(f"InputEmbedding: Padding mask shape for attention = {padding_mask.shape}")
+
+
+        # 3. Get embeddings (single operation for the whole batch)
+        # Shape: (batch_size, seq_len, d_model)
+        embeddings = self.embedding(input_ids_tensor)
+        print(f"InputEmbedding: Embeddings tensor shape (before scaling) = {embeddings.shape}")
+
+
+        # 4. Scale embeddings (common practice, mentioned in "Attention Is All You Need")
+        embeddings = embeddings * math.sqrt(self.d_model)
+
+        return embeddings, padding_mask
 
 
 """
@@ -110,39 +138,92 @@ class PositionalEncodingOriginalPaper(nn.Module):
 
 class PositionalEncoding(nn.Module):
     """
-    Positional encoding for the input embeddings.
+    Injects positional information into the input embeddings.
 
-    Args:
-        device: Optional[torch.device], the device to run the
-                positional encoding on
-        dropout: float, the dropout rate for the positional encoding
+    This implementation pre-computes the positional encoding matrix in __init__
+    using the sine and cosine functions described in "Attention Is All You Need".
+    It uses register_buffer to store the encoding matrix efficiently.
     """
+    def __init__(
+        self,
+        d_model: int,
+        dropout: float,
+        max_len: int = 5000, # Maximum possible sequence length
+        device: torch.device = device
+    ):
+        """
+        Initializes the PositionalEncoding layer.
 
-    def __init__(self, dropout: float, device: torch.device = device):
+        Args:
+            d_model (int): The dimensionality of the embeddings (must match input).
+            dropout (float): The dropout rate to apply after adding positional encoding.
+            max_len (int): The maximum sequence length that this model might ever encounter.
+                           The positional encoding matrix will be pre-computed up to this length.
+            device (torch.device): The device to place tensors on.
+        """
         super().__init__()
+        self.d_model = d_model
+        self.dropout = nn.Dropout(p=dropout)
+        self.max_len = max_len
         self.device = device
-        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, input_embeddings):
+        # --- Pre-compute the positional encoding matrix ---
+        # Shape: (max_len, d_model)
+        pe = torch.zeros(max_len, d_model, device=self.device)
+
+        # Position indices: (max_len, 1)
+        position = torch.arange(0, max_len, dtype=torch.float, device=self.device).unsqueeze(1)
+
+        # Calculate the division term: (d_model / 2)
+        # Formula: 1 / (10000^(2i / d_model)) -> log space -> exp(- (2i / d_model) * log(10000))
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float, device=self.device) * (-math.log(10000.0) / d_model))
+
+        # Calculate sine for even indices and cosine for odd indices
+        pe[:, 0::2] = torch.sin(position * div_term) # Apply to even columns
+        pe[:, 1::2] = torch.cos(position * div_term) # Apply to odd columns
+
+        # Add a batch dimension for broadcasting: (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
+
+        # Register 'pe' as a buffer. Buffers are model state like parameters,
+        # but are not updated by the optimizer. They are saved with the model
+        # and moved to the correct device automatically with .to(device).
+        self.register_buffer('pe', pe)
+        print(f"PositionalEncoding: Pre-computed 'pe' buffer with shape {self.pe.shape}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Currently works for single string input.
+        Adds positional encoding to the input embeddings.
 
-        TODO:
-            - Make it work for batch inputF
+        Args:
+            x (torch.Tensor): The input embeddings tensor of shape
+                              (batch_size, seq_len, d_model).
+
+        Returns:
+            torch.Tensor: The embeddings tensor with positional information added,
+                          after applying dropout. Shape remains
+                          (batch_size, seq_len, d_model).
         """
-        batch, seq_len, d_model = input_embeddings.shape
-        pos = torch.arange(seq_len, device=self.device).unsqueeze(1)
-        dim = torch.arange(d_model, device=self.device)
+        # x shape: (batch_size, seq_len, d_model)
+        batch_size, seq_len, _ = x.shape
 
-        angle_rates = pos * torch.exp(
-            (-2 * dim * torch.log(torch.tensor(10000, device=self.device))) / d_model
-        )
+        # Ensure seq_len does not exceed max_len
+        if seq_len > self.max_len:
+             raise ValueError(
+                 f"Input sequence length ({seq_len}) exceeds the maximum "
+                 f"sequence length ({self.max_len}) this PositionalEncoding "
+                 f"was initialized with."
+             )
 
-        pe = torch.zeros(seq_len, d_model, device=self.device)
-        pe[:, 0::2] = torch.sin(angle_rates[:, 0::2])
-        pe[:, 1::2] = torch.cos(angle_rates[:, 1::2])
+        # Add the pre-computed positional encoding.
+        # We take only the first 'seq_len' positions from the pre-computed matrix.
+        # self.pe shape: (1, max_len, d_model)
+        # Sliced pe shape: (1, seq_len, d_model)
+        # This will broadcast correctly across the batch dimension of x.
+        x = x + self.pe[:, :seq_len, :] # Add positional encoding
 
-        return self.dropout(pe.unsqueeze(0).expand(batch, -1, -1) + input_embeddings)
+        # Apply dropout
+        return self.dropout(x)
 
 
 class MultiHeadAttention(nn.Module):
@@ -150,18 +231,10 @@ class MultiHeadAttention(nn.Module):
         self,
         num_heads: int,
         d_model: int,
-        mask: torch.Tensor | None,
+        # mask: torch.Tensor | None, # mask should be passed in the forward method
         dropout: float,
         device: torch.device = device,
     ) -> None:
-        """
-        Args:
-            num_heads: Total number of heads for multihead attention
-            d_model: Dimension of the model (i.e., the size of the input embedding vector)
-            mask: Mask to apply to the attention scores
-            seq_length: Length of the sequence (i.e., the number of tokens in a given input text)
-            dropout: Dropout rate for the attention scores
-        """
         super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
@@ -200,28 +273,39 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         The original paper uses the term d_v instead of d_k, but d_v is the
         same as d_k.
         """
-
-        self.mask = mask
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod
-    def self_attention(
+    def scaled_dot_product_attention(
         query, key, value, dropout: nn.Dropout, mask=None, device: torch.device = device
     ):
-        _, _, _, d_k = query.shape
+        # _, _, _, d_k = query.shape
+
+        batch_size, num_heads, seq_len, d_k = query.shape
+        print(f"SDPA - Q:{query.shape}, K:{key.shape}, V:{value.shape}")
 
         attn_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+        print(f"SDPA - Scores shape: {attn_scores.shape}")
 
         if mask is not None:
-            if mask.dim() == 2:
-                # From [seq_len_q, seq_len_k] to [1, 1, seq_len_q, seq_len_k]
-                mask = mask.unsqueeze(0).unsqueeze(0)
-            elif mask.dim() == 3:
-                # From [1, seq_len_q, seq_len_k] to [1, 1, seq_len_q, seq_len_k]
-                mask = mask.unsqueeze(1)
-
+            # Ensure mask is on the correct device and has the right shape
+            # Expected mask shape: (batch_size, 1, 1, seq_len_k)
             mask = mask.to(device)
-            attn_scores = attn_scores.masked_fill(mask, float("-inf"))
+            if mask.shape != (batch_size, 1, 1, key.shape[2]):
+                 # Attempt to broadcast if needed, or raise error
+                 # This simple check assumes mask is for key padding
+                 try:
+                     # Example: if mask is (batch_size, 1, seq_len_k) -> add head dim
+                     if mask.dim() == 3 and mask.shape[1] == 1:
+                         mask = mask.unsqueeze(1) # -> (batch, 1, 1, seq_len_k)
+                     # Add more sophisticated checks if needed
+                     assert mask.shape == (batch_size, 1, 1, key.shape[2])
+                 except AssertionError:
+                     raise ValueError(f"Mask shape {mask.shape} is incompatible with attention scores shape {attn_scores.shape}. Expected ({batch_size}, 1, 1, {key.shape[2]})")
+
+            # print(f"SDPA - Applying mask with shape: {mask.shape}")
+            # Mask should be True where we want to mask *out* (padding)
+            attn_scores = attn_scores.masked_fill(mask, float("-1e9"))
 
         attn_weights = torch.softmax(attn_scores, dim=-1)
         if dropout is not None:
@@ -236,8 +320,14 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         k_encodings: torch.Tensor,
         v_encodings: torch.Tensor,
         mask=None,
-        device=device,
-    ) -> torch.Tensor:
+        return_weights: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]: # return attention weights if requested
+        
+        q_batch_size, q_seq_len, _ = q_encodings.shape
+        k_batch_size, k_seq_len, _ = k_encodings.shape
+        v_batch_size, v_seq_len, _ = v_encodings.shape
+        # these 3 ↑ are pretty much the same, but I'm writing them like this for my own clarity
+
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         q = self.W_q(q_encodings)
 
@@ -247,24 +337,21 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
 
-        query = q.view(q.shape[0], q.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        query = q.view(q_batch_size, q_seq_len, self.num_heads, self.d_k).transpose(1, 2)
         # ========================== ↑ Query Tensor Reshape Logic ↑ ==========================
         # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
 
-        key = k.view(k.shape[0], k.shape[1], self.num_heads, self.d_k).transpose(1, 2)
-        value = v.view(v.shape[0], v.shape[1], self.num_heads, self.d_k).transpose(1, 2)
-
-        # Use the passed mask if provided, otherwise use self.mask
-        mask_to_use = mask if mask is not None else self.mask
+        key = k.view(k_batch_size, k_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        value = v.view(v_batch_size, v_seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
         # shape of output => (batch, num_heads, seq_length, d_k)
-        output, self.attn_weights = MultiHeadAttention.self_attention(
+        output, attn_weights = MultiHeadAttention.scaled_dot_product_attention(
             query=query,
             key=key,
             value=value,
             dropout=self.dropout,
-            mask=mask_to_use,
-            device=device,
+            mask=mask,
+            device=self.device,
         )
 
         H = torch.transpose(output, 1, 2).contiguous()
@@ -272,7 +359,11 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # ========================== ↑ H (concatenated head) Tensor Logic ↑ ==========================
         # (batch, num_heads, seq_length, d_k) {transpose} -> (batch, seq_length, num_heads, d_k) {contiguous} -> (batch, seq_length, num_heads * d_k)
 
-        return self.W_o(H)
+        final_output = self.W_o(H)
+        if return_weights:
+            return final_output, attn_weights # Return weights if requested
+        else:
+            return final_output, None # Return None for weights otherwise
 
 
 class ResidualConnection(nn.Module):
@@ -480,121 +571,158 @@ class EncoderBlock(nn.Module):
             ]
         )
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask, return_attn_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass for the encoder block.
 
         Args:
-            x: Tensor of shape [batch_size, seq_length, d_model] - already embedded and position-encoded
-            mask: Optional mask for self-attention
+            x (torch.Tensor): Input tensor of shape [batch, seq_len, d_model].
+            mask (torch.Tensor): Padding mask of shape [batch, 1, 1, seq_len].
+            return_attn_weights (bool): If True, return attention weights from MHA.
 
         Returns:
-            Tensor of same shape as input
+            Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                - Output tensor of the same shape as input.
+                - Attention weights tensor if return_attn_weights is True, else None.
         """
-        # First connection: multi-head attention + layer norm + residual connection
-        attn_output = self.residual_connections[0](
-            x=x,
-            sublayer=lambda x_residual_input: self.self_attn_block(
-                x_residual_input,  # query
-                x_residual_input,  # key
-                x_residual_input,  # value
-                mask=mask,
-                device=self.device,
-            ),
+        mha_sublayer = lambda x_residual: self.self_attn_block(
+            x_residual, x_residual, x_residual, mask, return_weights=return_attn_weights # Pass flag
         )
 
-        # Second connection: feed-forward + layer norm + residual connection
-        ff_output = self.residual_connections[1](
-            x=attn_output,
-            sublayer=self.feed_forward_block,
+        # Need to handle the tuple output (output, weights) from mha_sublayer
+        attn_block_input = x
+        attn_raw_output, attn_weights = mha_sublayer(attn_block_input) # Get both outputs
+
+        # first connection (mha + dropout + residual)
+        x = self.residual_connections[0].norm(
+            attn_block_input + self.residual_connections[0].dropout(attn_raw_output)
         )
 
-        return ff_output
+        # Store the output of the first residual connection for the second one
+        ff_block_input = x
+
+        # second connection (ff + dropout + residual)
+        # FeedForward doesn't need the mask or return weights
+        ff_sublayer = self.feed_forward_block
+        ff_raw_output = ff_sublayer(ff_block_input)
+        x = self.residual_connections[1].norm(
+            ff_block_input + self.residual_connections[1].dropout(ff_raw_output)
+        )
+
+        return x, attn_weights # Return final output and weights (or None)
 
 
 class Encoder(nn.Module):
-    def __init__(self, config: dict, n_layers=6, device: torch.device = device):
+    """
+    The main Transformer Encoder stack.
+
+    Handles input embedding, positional encoding, and passes the data
+    through multiple EncoderBlock layers.
+    """
+    def __init__(self, config: dict, n_layers: int = 6, device: torch.device = device):
+        """
+        Initializes the Encoder stack.
+
+        Args:
+            config (dict): Configuration dictionary containing parameters like:
+                           'd_model', 'tokenizer_name', 'dropout', 'max_len' (for PE),
+                           'num_heads', 'd_ff'.
+            n_layers (int): Number of EncoderBlocks to stack. Defaults to 6.
+            device (torch.device): The device to place tensors on.
+        """
         super().__init__()
         self.config = config
         self.device = device
+        self.n_layers = n_layers
 
-        # Input processing - only needed at Encoder level
-        self.input_embedding = InputEmbedding(d_model=config["d_model"], device=device)
+        # Input processing layers
+        self.input_embedding = InputEmbedding(
+            d_model=config["d_model"],
+            tokenizer_name=config.get("tokenizer_name", DEFAULT_TOKENIZER_NAME), # Get from config or use default
+            device=device,
+            max_length=config.get("max_length", None) # Allow fixed length via config
+        )
         self.positional_encoding = PositionalEncoding(
-            dropout=config["dropout"], device=device
+            d_model=config["d_model"],
+            dropout=config["dropout"],
+            max_len=config.get("max_len_pe", 5000), # Max length for PE matrix
+            device=device
         )
 
-        # Create n_layers encoder blocks
+        # Create a stack of n_layers encoder blocks
         self.layers = nn.ModuleList(
             [self._create_encoder_block() for _ in range(n_layers)]
         )
 
-        self._seq_length = None
+        # self._seq_length = None
 
-    def _create_encoder_block(self):
-        # Helper method to create an encoder block with all its components
+    def _create_encoder_block(self) -> EncoderBlock:
+        """Helper method to create a single EncoderBlock."""
         self_attn = MultiHeadAttention(
             num_heads=self.config["num_heads"],
             d_model=self.config["d_model"],
-            mask=None,
+            # mask=None, # Mask is passed in forward so don't need to pass here
             dropout=self.config["dropout"],
             device=self.device,
         )
-
         feed_forward = FeedForward(
             d_model=self.config["d_model"],
-            d_ff=self.config.get("d_ff", 2048),  # Default to 2048 if not specified
+            d_ff=self.config.get("d_ff", 2048), # Default d_ff
             dropout=self.config["dropout"],
             device=self.device,
         )
-
         return EncoderBlock(
-            config=self.config,
+            config=self.config, # Pass config down if needed by block/sublayers
             self_attn_block=self_attn,
             feed_forward_block=feed_forward,
             device=self.device,
         )
 
-    def forward(self, input_text, masking: bool = False):
-        # Process input text to get embeddings
-        token_ids, embeddings = self.input_embedding(input_text)
-        self._seq_length = len(token_ids)
+    def forward(self, input_texts: List[str], return_last_layer_attn_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass for the entire Encoder stack.
 
-        # Add positional encoding
+        Args:
+            input_texts (List[str]): A batch of raw input strings.
+            return_last_layer_attn_weights (bool): If True, return attention weights
+                                             from the final EncoderBlock.
+
+        Returns:
+            Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                - The encoded output tensor of shape (batch_size, seq_len, d_model).
+                - Attention weights from the last layer if requested, else None.
+        """
+        # 1. Get embeddings and the padding mask
+        # embeddings: (batch, seq_len, d_model)
+        # padding_mask: (batch, 1, 1, seq_len), True for padding
+        embeddings, padding_mask = self.input_embedding(input_texts)
+        print(f"Encoder.forward: Embeddings shape: {embeddings.shape}, Padding Mask shape: {padding_mask.shape}")
+
+        # 2. Add positional encoding
         x = self.positional_encoding(embeddings)
+        print(f"Encoder.forward: After Positional Encoding shape: {x.shape}")
+        
+        last_layer_attn_weights = None # Initialize to None
 
-        # Create mask if needed
-        mask = (
-            self.create_causal_mask(self._seq_length, self._seq_length)
-            if masking
-            else None
-        )
+        # 3. Pass through each encoder block layer
+        for i, layer in enumerate(self.layers):
+            # Request weights only from the last layer if needed
+            request_weights_from_layer = return_last_layer_attn_weights and (i == self.n_layers - 1)
+            x, attn_weights = layer(x, padding_mask, return_attn_weights=request_weights_from_layer)
+            print(f"Encoder.forward: After Layer {i+1} shape: {x.shape}")
+            if request_weights_from_layer:
+                last_layer_attn_weights = attn_weights
 
-        # Pass through each encoder block
-        for layer in self.layers:
-            x = layer(x, mask)
-
-        # output of the last encoder block
-        return x
-
-    # Utility methods should only be in Encoder
+        print(f"Encoder.forward: Final Output shape: {x.shape}")
+        return x, last_layer_attn_weights
+    
+    # Exposing tokenizer for testing convenience
     @property
-    def seq_length(self):
-        return self._seq_length
+    def tokenizer(self):
+        return self.input_embedding.tokenizer
 
-    def vocab_size(self) -> int:
-        return Tokenizer().vocab_size
+    # Exposing padding ID for testing convenience
+    @property
+    def padding_token_id(self):
+        return self.input_embedding.padding_token_id
 
-    def create_causal_mask(
-        self, seq_len_q, seq_len_k, device: torch.device = None
-    ) -> torch.Tensor | None:
-        """Create a causal mask for attention."""
-        device = device or self.device
-        # Check for both "masking" and "causal_masking" for backward compatibility
-        if self.config.get("masking", False) or self.config.get(
-            "causal_masking", False
-        ):
-            mask = torch.ones(seq_len_q, seq_len_k, dtype=torch.bool, device=device)
-            mask = torch.triu(mask, diagonal=1)
-            return mask
-        return None
