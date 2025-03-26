@@ -12,15 +12,15 @@ print(f"--- Testing on device: {device} ---")
 # --- Test Configuration ---
 # Use a smaller model for faster testing if desired
 TEST_CONFIG = {
-    "d_model": 128,  # Smaller embedding dimension
-    "num_heads": 4,  # Fewer heads (ensure d_model % num_heads == 0)
+    "d_model": 512,  # Smaller embedding dimension
+    "num_heads": 8,  # Fewer heads (ensure d_model % num_heads == 0)
     "dropout": 0.1,  # Dropout doesn't matter much in eval mode, but setting it
-    "d_ff": 256,  # Smaller feed-forward dimension
+    "d_ff": 2048,  # Smaller feed-forward dimension
     "tokenizer_name": "bert-base-uncased",  # check for more here: https://huggingface.co/models
     "max_len_pe": 512,  # Max length for Positional Encoding matrix
     "max_length": None,  # Pad to longest in batch for tests unless specified otherwise
 }
-NUM_TEST_LAYERS = 2  # Use fewer layers for faster tests
+NUM_TEST_LAYERS = 6  # layers in the encoder
 
 
 # --- Helper Function (Optional, for cleaner tests) ---

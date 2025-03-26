@@ -82,7 +82,16 @@ class InputEmbedding(nn.Module):
                   that should be masked (padding). Suitable for attention mechanisms.
         """
         assert isinstance(input_texts, list), "Input must be a list of strings."
-        print(f"InputEmbedding: Received {len(input_texts)} strings.")
+        if len(input_texts) < 1:
+            assert False, "InputEmbedding: Received an empty list of strings.\n"
+        elif len(input_texts) == 1:
+            print(
+                f"InputEmbedding: Received {len(input_texts)} string.\n"
+            )
+        else:
+            print(
+                f"InputEmbedding: Received {len(input_texts)} strings.\n"
+            )
 
         # 1. Tokenize the batch using the Hugging Face tokenizer
         # This handles tokenization, adding special tokens, padding, truncation,
