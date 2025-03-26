@@ -4,11 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-device = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps" if torch.backends.mps.is_available() else "cpu"
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from transformers import (
     AutoTokenizer,
     PreTrainedTokenizerFast,
@@ -85,13 +81,9 @@ class InputEmbedding(nn.Module):
         if len(input_texts) < 1:
             assert False, "InputEmbedding: Received an empty list of strings.\n"
         elif len(input_texts) == 1:
-            print(
-                f"InputEmbedding: Received {len(input_texts)} string.\n"
-            )
+            print(f"InputEmbedding: Received {len(input_texts)} string.\n")
         else:
-            print(
-                f"InputEmbedding: Received {len(input_texts)} strings.\n"
-            )
+            print(f"InputEmbedding: Received {len(input_texts)} strings.\n")
 
         # 1. Tokenize the batch using the Hugging Face tokenizer
         # This handles tokenization, adding special tokens, padding, truncation,
@@ -316,44 +308,51 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
     @staticmethod
     def scaled_dot_product_attention(
-        query, key, value, dropout: nn.Dropout, mask=None, device: torch.device = device
-    ):
-        # _, _, _, d_k = query.shape
-
-        batch_size, num_heads, seq_len, d_k = query.shape
-        print(f"SDPA - Q:{query.shape}, K:{key.shape}, V:{value.shape}")
+        query,
+        key,
+        value,
+        dropout: Optional[nn.Dropout],
+        mask=None,
+        device: torch.device = "cpu",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # Return weights too
+        batch_size, num_heads, seq_len_q, d_k = query.shape
+        seq_len_k = key.shape[2]
 
         attn_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
-        print(f"SDPA - Scores shape: {attn_scores.shape}")
+        # attn_scores shape: (batch_size, num_heads, seq_len_q, seq_len_k)
 
         if mask is not None:
-            # Ensure mask is on the correct device and has the right shape
-            # Expected mask shape: (batch_size, 1, 1, seq_len_k)
             mask = mask.to(device)
-            if mask.shape != (batch_size, 1, 1, key.shape[2]):
-                # Attempt to broadcast if needed, or raise error
-                # This simple check assumes mask is for key padding
-                try:
-                    # Example: if mask is (batch_size, 1, seq_len_k) -> add head dim
-                    if mask.dim() == 3 and mask.shape[1] == 1:
-                        mask = mask.unsqueeze(1)  # -> (batch, 1, 1, seq_len_k)
-                    # Add more sophisticated checks if needed
-                    assert mask.shape == (batch_size, 1, 1, key.shape[2])
-                except AssertionError:
-                    raise ValueError(
-                        f"Mask shape {mask.shape} is incompatible with attention scores shape {attn_scores.shape}. Expected ({batch_size}, 1, 1, {key.shape[2]})"
-                    )
 
-            # print(f"SDPA - Applying mask with shape: {mask.shape}")
-            # Mask should be True where we want to mask *out* (padding)
-            attn_scores = attn_scores.masked_fill(mask, float("-1e9"))
+            # The mask needs to be broadcastable to attn_scores shape.
+            # Common valid shapes include:
+            # (B, 1, 1, Sk) - Padding mask for Encoder/Cross-Attention
+            # (B, 1, Sq, Sk) - Combined mask for Decoder Self-Attention
+            # (1, 1, Sq, Sk) - Look-ahead mask only
+            # I mainly need the last two dimensions to match or broadcast correctly.
+            if mask.dim() != 4:
+                raise ValueError(f"Mask dimension must be 4, got {mask.dim()}")
+            if mask.shape[-1] != seq_len_k:
+                raise ValueError(
+                    f"Mask key sequence length {mask.shape[-1]} doesn't match scores key length {seq_len_k}"
+                )
+            if (
+                mask.shape[-2] != seq_len_q and mask.shape[-2] != 1
+            ):  # Allow query dim to be 1 for broadcasting
+                raise ValueError(
+                    f"Mask query sequence length {mask.shape[-2]} is incompatible with scores query length {seq_len_q}"
+                )
+
+            # Mask should be True where attention is inhibited (padding or future positions)
+            attn_scores = attn_scores.masked_fill(
+                mask, float("-1e9")
+            )  # Use large negative number
 
         attn_weights = torch.softmax(attn_scores, dim=-1)
         if dropout is not None:
             attn_weights = dropout(attn_weights)
         output = torch.matmul(attn_weights, value)
-
-        return output, attn_weights
+        return output, attn_weights  # Return weights
 
     def forward(
         self,
@@ -527,7 +526,7 @@ class LayerNorm(nn.Module):
         var_x = torch.var(x, dim=-1, keepdim=True, unbiased=False)
         normalized_x = (x - mean_x) / torch.sqrt(var_x + self.epsilon)
         return self.gamma * normalized_x + self.beta
-    
+
     # NOTE: I could just use nn.LayerNorm, but I implemented it myself to understand it better.
     # nn.LayerNorm is probably better if I'm using it for more serious projects.
 
@@ -642,21 +641,21 @@ class EncoderBlock(nn.Module):
             x_residual,
             x_residual,
             mask,
-            return_weights=return_attn_weights,  # Pass flag
+            return_weights=return_attn_weights,  # Passing flag
         )
 
         # Need to handle the tuple output (output, weights) from mha_sublayer
         attn_block_input = x
         attn_raw_output, attn_weights = mha_sublayer(
             attn_block_input
-        )  # Get both outputs
+        )  # Getting both outputs
 
         # first connection (mha + dropout + residual)
         x = self.residual_connections[0].norm(
             attn_block_input + self.residual_connections[0].dropout(attn_raw_output)
         )
 
-        # Store the output of the first residual connection for the second one
+        # Storing the output of the first residual connection for the second one
         ff_block_input = x
 
         # second connection (ff + dropout + residual)
@@ -667,7 +666,7 @@ class EncoderBlock(nn.Module):
             ff_block_input + self.residual_connections[1].dropout(ff_raw_output)
         )
 
-        return x, attn_weights  # Return final output and weights (or None)
+        return x, attn_weights  # Returning final output and weights (or None)
 
 
 class Encoder(nn.Module):
@@ -699,9 +698,9 @@ class Encoder(nn.Module):
             d_model=config["d_model"],
             tokenizer_name=config.get(
                 "tokenizer_name", DEFAULT_TOKENIZER_NAME
-            ),  # Get from config or use default
+            ),  # Getting from config or using default
             device=device,
-            max_length=config.get("max_length", None),  # Allow fixed length via config
+            max_length=config.get("max_length", None),  # Allowing fixed length via config
         )
         self.positional_encoding = PositionalEncoding(
             d_model=config["d_model"],
@@ -710,7 +709,7 @@ class Encoder(nn.Module):
             device=device,
         )
 
-        # Create a stack of n_layers encoder blocks
+        # Creating a stack of n_layers encoder blocks
         self.layers = nn.ModuleList(
             [self._create_encoder_block() for _ in range(n_layers)]
         )
@@ -733,7 +732,7 @@ class Encoder(nn.Module):
             device=self.device,
         )
         return EncoderBlock(
-            config=self.config,  # Pass config down if needed by block/sublayers
+            config=self.config,  # Passing config down if needed by block/sublayers
             self_attn_block=self_attn,
             feed_forward_block=feed_forward,
             device=self.device,
@@ -755,7 +754,7 @@ class Encoder(nn.Module):
                 - The encoded output tensor of shape (batch_size, seq_len, d_model).
                 - Attention weights from the last layer if requested, else None.
         """
-        # 1. Get embeddings and the padding mask
+        # 1. Getting embeddings and the padding mask
         # embeddings: (batch, seq_len, d_model)
         # padding_mask: (batch, 1, 1, seq_len), True for padding
         embeddings, padding_mask = self.input_embedding(input_texts)
@@ -763,15 +762,15 @@ class Encoder(nn.Module):
             f"Encoder.forward: Embeddings shape: {embeddings.shape}, Padding Mask shape: {padding_mask.shape}"
         )
 
-        # 2. Add positional encoding
+        # 2. Adding positional encoding
         x = self.positional_encoding(embeddings)
         print(f"Encoder.forward: After Positional Encoding shape: {x.shape}")
 
         last_layer_attn_weights = None  # Initialize to None
 
-        # 3. Pass through each encoder block layer
+        # 3. Passing through each encoder block layer
         for i, layer in enumerate(self.layers):
-            # Request weights only from the last layer if needed
+            # Requesting weights only from the last layer if needed
             request_weights_from_layer = return_last_layer_attn_weights and (
                 i == self.n_layers - 1
             )
@@ -794,3 +793,218 @@ class Encoder(nn.Module):
     @property
     def padding_token_id(self):
         return self.input_embedding.padding_token_id
+
+
+class DecoderBlock(nn.Module):
+    """
+    Single block for the Transformer Decoder stack.
+
+    Applies Masked Self-Attention, Cross-Attention, and Feed-Forward network,
+    each followed by Add & Norm (Post-LN).
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        dropout: float,
+        device: torch.device,
+    ):
+        super().__init__()
+        self.masked_self_attn = MultiHeadAttention(num_heads, d_model, dropout, device)
+        self.cross_attn = MultiHeadAttention(num_heads, d_model, dropout, device)
+        self.feed_forward = FeedForward(d_model, d_ff, dropout, device)
+
+        self.norm1 = LayerNorm(d_model).to(device) # Ensuring LayerNorm is also moved to device if custom
+        self.norm2 = LayerNorm(d_model).to(device)
+        self.norm3 = LayerNorm(d_model).to(device)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,                 # Target sequence embeddings (B, TgtSeqLen, D)
+        encoder_output: torch.Tensor,    # Encoder output (B, SrcSeqLen, D)
+        target_mask: torch.Tensor,       # Combined causal & padding mask for target (B, 1, TgtSeqLen, TgtSeqLen) or broadcastable
+        encoder_padding_mask: torch.Tensor,# Padding mask for encoder output (B, 1, 1, SrcSeqLen)
+        return_attn_weights: bool = False # ADDED parameter
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]: # MODIFIED return type
+        # Returning output, self_attn_weights, cross_attn_weights
+
+        # 1. Masked Self-Attention (Query, Key, Value are all x)
+        # Passing the return_weights flag down
+        self_attn_output, self_attn_weights = self.masked_self_attn(
+            x, x, x, target_mask, return_weights=return_attn_weights
+        )
+        x = self.norm1(x + self.dropout(self_attn_output))  # Add & Norm
+
+        # 2. Cross-Attention (Query is x, Key/Value are encoder_output)
+        # Passing the return_weights flag down
+        cross_attn_output, cross_attn_weights = self.cross_attn(
+            x, encoder_output, encoder_output, encoder_padding_mask, return_weights=return_attn_weights
+        )
+        x = self.norm2(x + self.dropout(cross_attn_output))  # Add & Norm
+
+        # 3. Feed Forward
+        ff_output = self.feed_forward(x)
+        x = self.norm3(x + self.dropout(ff_output))  # Add & Norm
+
+        # Returning weights only if requested
+        sa_w = self_attn_weights if return_attn_weights else None
+        ca_w = cross_attn_weights if return_attn_weights else None
+        return x, sa_w, ca_w
+
+
+class Decoder(nn.Module):
+    """
+    The Transformer Decoder stack.
+    Handles target embedding, positional encoding, and passes data through
+    multiple DecoderBlock layers.
+    """
+
+    def __init__(
+        self,
+        target_vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        num_heads: int,
+        d_ff: int,
+        dropout: float,
+        max_len_pe: int,
+        device: torch.device,
+    ):
+        super().__init__()
+        self.device = device
+        self.n_layers = n_layers
+        self.target_embedding = nn.Embedding(target_vocab_size, d_model, device=device)
+        self.positional_encoding = PositionalEncoding(
+            d_model, dropout, max_len_pe, device
+        )
+
+        self.layers = nn.ModuleList(
+            [
+                DecoderBlock(d_model, num_heads, d_ff, dropout, device)
+                for _ in range(n_layers)
+            ]
+        )
+        print(f"Decoder: Initialized with {n_layers} layers.")
+
+    def _create_look_ahead_mask(self, size: int) -> torch.Tensor:
+        """Creates a look-ahead mask of shape (1, 1, size, size)."""
+        mask = torch.ones(size, size, device=self.device, dtype=torch.bool)
+        mask = torch.triu(mask, diagonal=1)  # Upper triangle (True where j > i)
+        return mask.unsqueeze(0).unsqueeze(0)  # Adding batch and head dims
+
+    def forward(
+        self,
+        target_token_ids: torch.Tensor,
+        encoder_output: torch.Tensor,
+        encoder_padding_mask: torch.Tensor,
+        target_padding_mask: Optional[torch.Tensor] = None,
+        return_last_layer_attn_weights: bool = False,  # Flag to get weights from last layer
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Returning output, last_self_attn_weights, last_cross_attn_weights
+
+        batch_size, tgt_seq_len = target_token_ids.shape
+        x = self.target_embedding(target_token_ids) * math.sqrt(
+            self.target_embedding.embedding_dim
+        )
+        x = self.positional_encoding(x)
+
+        look_ahead_mask = self._create_look_ahead_mask(tgt_seq_len)
+        combined_target_mask = (
+            torch.logical_or(look_ahead_mask, target_padding_mask)
+            if target_padding_mask is not None
+            else look_ahead_mask
+        )
+
+        last_self_attn_weights = None
+        last_cross_attn_weights = None
+        for i, layer in enumerate(self.layers):
+            request_weights = return_last_layer_attn_weights and (
+                i == self.n_layers - 1
+            )
+            x, sa_w, ca_w = layer(  # Getting all 3 return values
+                x=x,
+                encoder_output=encoder_output,
+                target_mask=combined_target_mask,
+                encoder_padding_mask=encoder_padding_mask,
+                return_attn_weights=request_weights,  # Passing flag to layer
+            )
+            if request_weights:
+                last_self_attn_weights = sa_w
+                last_cross_attn_weights = ca_w
+
+        return x, last_self_attn_weights, last_cross_attn_weights
+
+
+class ProjectionLayer(nn.Module):
+    """Projects the decoder output to vocabulary logits."""
+
+    def __init__(self, d_model: int, vocab_size: int, device: torch.device):
+        super().__init__()
+        self.proj = nn.Linear(d_model, vocab_size, device=device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (Batch, SeqLen, Dim) -> (Batch, SeqLen, VocabSize)
+        # Applying log_softmax for NLLLoss or keeping as logits for CrossEntropyLoss
+        # return F.log_softmax(self.proj(x), dim=-1) # Example for NLLLoss
+        return self.proj(x)  # Returning raw logits for CrossEntropyLoss
+
+
+class Transformer(nn.Module):
+    """
+    A standard Encoder-Decoder Transformer model.
+    """
+
+    def __init__(
+        self, encoder: nn.Module, decoder: nn.Module, projection_layer: nn.Module
+    ):
+        """
+        Initializes the full Transformer model.
+
+        Args:
+            encoder (nn.Module): An initialized Encoder instance.
+            decoder (nn.Module): An initialized Decoder instance.
+            projection_layer (nn.Module): An initialized ProjectionLayer instance.
+        """
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.projection_layer = projection_layer
+
+    def forward(
+        self,
+        source_texts: List[str],
+        target_token_ids: torch.Tensor,
+        target_padding_id: int = 0,
+        return_last_dec_attn_weights: bool = False,  # Flag for decoder weights
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Returning logits, last_self_attn_weights, last_cross_attn_weights
+
+        # 1. Encoding
+        # *** ENSURING MY ENCODER RETURNS (output, mask) ***
+        encoder_output, encoder_padding_mask = self.encoder(source_texts)
+
+        # 2. Preparing target padding mask
+        target_padding_mask = (
+            (target_token_ids == target_padding_id)
+            .unsqueeze(1)
+            .unsqueeze(2)
+            .to(target_token_ids.device)
+        )
+
+        # 3. Decoding
+        decoder_output, last_self_attn_weights, last_cross_attn_weights = self.decoder(
+            target_token_ids=target_token_ids,
+            encoder_output=encoder_output,
+            encoder_padding_mask=encoder_padding_mask,
+            target_padding_mask=target_padding_mask,
+            # Passing the flag down to the decoder
+            return_last_layer_attn_weights=return_last_dec_attn_weights,
+        )
+
+        # 4. Projecting to Logits
+        logits = self.projection_layer(decoder_output)
+
+        # Returning logits and optionally the weights from the last decoder layer
+        return logits, last_self_attn_weights, last_cross_attn_weights

@@ -3,245 +3,271 @@ This test is for the Encoder class. I created it with the help of Gemini 2.5.
 """
 
 import torch
-from model import Encoder
+import math
+from typing import List, Tuple, Optional
+from model import Transformer, Encoder, Decoder, ProjectionLayer, InputEmbedding, PositionalEncoding # Import all needed
 
 # Define test device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"--- Testing on device: {device} ---")
 
 # --- Test Configuration ---
-# Use a smaller model for faster testing if desired
 TEST_CONFIG = {
-    "d_model": 512,  # Smaller embedding dimension
-    "num_heads": 8,  # Fewer heads (ensure d_model % num_heads == 0)
-    "dropout": 0.1,  # Dropout doesn't matter much in eval mode, but setting it
-    "d_ff": 2048,  # Smaller feed-forward dimension
-    "tokenizer_name": "bert-base-uncased",  # check for more here: https://huggingface.co/models
-    "max_len_pe": 512,  # Max length for Positional Encoding matrix
-    "max_length": None,  # Pad to longest in batch for tests unless specified otherwise
+    "d_model": 128,
+    "num_heads": 4,
+    "dropout": 0.1,
+    "d_ff": 256,
+    "tokenizer_name": "bert-base-uncased", # For Encoder's InputEmbedding
+    "max_len_pe": 512,
+    "target_vocab_size": 10000, # Example target vocab size
+    "max_length": None # InputEmbedding padding behavior
 }
-NUM_TEST_LAYERS = 6  # layers in the encoder
+NUM_ENC_LAYERS = 2 # Fewer layers for faster tests
+NUM_DEC_LAYERS = 2
+TARGET_PADDING_ID = 0 # Define target padding ID used in dummy data
 
-
-# --- Helper Function (Optional, for cleaner tests) ---
-def run_encoder(encoder_model, texts, return_weights=False):
-    """Runs the encoder in eval mode with no gradients."""
-    encoder_model.eval()  # Set to evaluation mode
-    with torch.no_grad():  # Disable gradient calculations
-        output, weights = encoder_model(
-            texts, return_last_layer_attn_weights=return_weights
+# --- Helper Function ---
+def run_transformer(transformer_model, src_texts, tgt_tokens, return_weights=False):
+    """Runs the transformer in eval mode with no gradients."""
+    transformer_model.eval()
+    with torch.no_grad():
+        logits, sa_weights, ca_weights = transformer_model(
+            src_texts, tgt_tokens,
+            target_padding_id=TARGET_PADDING_ID, # Pass padding ID
+            return_last_dec_attn_weights=return_weights
         )
-    return output, weights
-
+    return logits, sa_weights, ca_weights
 
 # --- Test Functions ---
 
+def test_transformer_forward_shape():
+    print("\n--- Test 1: Full Transformer Forward Pass & Shape Check ---")
+    # Initialize full model
+    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
+    decoder = Decoder(
+        target_vocab_size=TEST_CONFIG["target_vocab_size"],
+        d_model=TEST_CONFIG["d_model"], n_layers=NUM_DEC_LAYERS,
+        num_heads=TEST_CONFIG["num_heads"], d_ff=TEST_CONFIG["d_ff"],
+        dropout=TEST_CONFIG["dropout"], max_len_pe=TEST_CONFIG["max_len_pe"], device=device
+    )
+    projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
+    transformer = Transformer(encoder, decoder, projection).to(device)
 
-def test_forward_pass_shape():
-    print("\n--- Test 1: Basic Forward Pass & Shape Check ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_TEST_LAYERS, device=device)
-    test_texts = [
-        "This is the first sentence.",
-        "Here is another one, slightly longer.",
-        "A short sentence.",
-        "The correct person to do this job is William, and I'll tell you why.",
-    ]
-    # --- CORRECTED LINE ---
-    # Get the tokenizer object first, then call it
-    tokenizer_obj = encoder.tokenizer
-    encodings = tokenizer_obj(test_texts, padding="longest", return_tensors="pt")
-    # --- END CORRECTION ---
-    expected_seq_len = encodings["input_ids"].shape[1]
+    # Dummy data
+    test_src = ["Source sentence.", "Another one."]
+    test_tgt_len = 10
+    test_tgt = torch.randint(1, 500, (len(test_src), test_tgt_len), device=device) # Random target IDs > 0
+    test_tgt[:, -2:] = TARGET_PADDING_ID # Add some padding
 
-    encoder_output, _ = run_encoder(encoder, test_texts)
+    logits, _, _ = run_transformer(transformer, test_src, test_tgt)
 
-    print(f"Test 1 Output Shape: {encoder_output.shape}")
-    assert encoder_output.shape[0] == len(
-        test_texts
-    ), f"Expected batch size {len(test_texts)}, got {encoder_output.shape[0]}"
-    assert (
-        encoder_output.shape[1] == expected_seq_len
-    ), f"Expected seq len {expected_seq_len}, got {encoder_output.shape[1]}"
-    assert (
-        encoder_output.shape[2] == TEST_CONFIG["d_model"]
-    ), f"Expected d_model {TEST_CONFIG['d_model']}, got {encoder_output.shape[2]}"
-    print("Test 1 Passed: Basic forward pass completed with correct output dimensions.")
+    print(f"Test 1 Output Logits Shape: {logits.shape}")
+    assert logits.shape[0] == len(test_src), f"Expected batch size {len(test_src)}, got {logits.shape[0]}"
+    assert logits.shape[1] == test_tgt_len, f"Expected target seq len {test_tgt_len}, got {logits.shape[1]}"
+    assert logits.shape[2] == TEST_CONFIG["target_vocab_size"], f"Expected target vocab size {TEST_CONFIG['target_vocab_size']}, got {logits.shape[2]}"
+    print("Test 1 Passed: Transformer forward pass completed with correct output dimensions.")
 
+def test_transformer_batch_independence():
+    print("\n--- Test 2: Transformer Batch Independence / Determinism ---")
+    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
+    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
+    transformer = Transformer(encoder, decoder, projection).to(device)
 
-def test_batch_independence():
-    print("\n--- Test 2: Batch Independence / Determinism ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_TEST_LAYERS, device=device)
-    # IMPORTANT: Set to eval mode to disable dropout for this test
-    encoder.eval()
-    test_texts = [
-        "This is a test sentence.",
-        "This is a test sentence.",  # Identical sentence
-    ]
-    encoder_output, _ = run_encoder(
-        encoder, test_texts
-    )  # run_encoder handles eval() and no_grad()
+    test_src = ["Identical source.", "Identical source."]
+    test_tgt = torch.tensor([
+        [101, 100, 102, TARGET_PADDING_ID],
+        [101, 100, 102, TARGET_PADDING_ID] # Identical target
+    ], dtype=torch.long, device=device)
 
-    output_seq0 = encoder_output[0]  # Output for the first instance
-    output_seq1 = encoder_output[1]  # Output for the second instance
+    logits, _, _ = run_transformer(transformer, test_src, test_tgt) # Handles eval() and no_grad()
 
-    are_identical = torch.allclose(output_seq0, output_seq1, atol=1e-6)
+    logits_seq0 = logits[0]
+    logits_seq1 = logits[1]
+
+    are_identical = torch.allclose(logits_seq0, logits_seq1, atol=1e-5) # Use slightly higher tolerance
     print(f"Test 2 Outputs for identical inputs are identical: {are_identical}")
-    assert (
-        are_identical
-    ), "Test 2 Failed: Outputs for identical inputs in a batch differ!"
-    print(
-        "Test 2 Passed: Model produces deterministic outputs for identical inputs in a batch (in eval mode)."
-    )
+    assert are_identical, "Test 2 Failed: Transformer outputs for identical inputs differ!"
+    print("Test 2 Passed: Transformer produces deterministic outputs (in eval mode).")
 
+def test_encoder_padding_in_cross_attn():
+    print("\n--- Test 3: Encoder Padding Mask in Cross-Attention ---")
+    # Need specific setup to ensure encoder padding
+    test_config_pad = TEST_CONFIG.copy()
+    # test_config_pad["max_length"] = 15 # Force padding/truncation if needed
 
-def test_padding_mask_effectiveness():
-    print("\n--- Test 3: Padding Mask Effectiveness ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_TEST_LAYERS, device=device)
-    test_texts = [
-        "Short sentence.",  # Will be padded
-        "This is a much longer sentence to ensure padding happens.",
-    ]
+    encoder = Encoder(config=test_config_pad, n_layers=NUM_ENC_LAYERS, device=device)
+    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
+    transformer = Transformer(encoder, decoder, projection).to(device)
 
-    # --- CORRECTED LINES ---
-    # Get the tokenizer object first, then call it
-    tokenizer_obj = encoder.tokenizer
-    encodings = tokenizer_obj(test_texts, padding="longest", return_tensors="pt").to(
-        device
-    )
-    # --- END CORRECTION ---
-    input_ids = encodings["input_ids"]
-    # Access padding_token_id via property
-    padding_token_id = encoder.padding_token_id
-    is_padding_in_seq0 = input_ids[0] == padding_token_id
-    padding_indices_seq0 = torch.where(is_padding_in_seq0)[0].tolist()
-    non_padding_indices_seq0 = torch.where(~is_padding_in_seq0)[0].tolist()
+    test_src = ["Source.", "A much longer source sentence for padding."]
+    test_tgt_len = 5
+    test_tgt = torch.randint(1, 500, (len(test_src), test_tgt_len), device=device) # Simple target
 
-    print(f"Test 3: Sequence 0 Input IDs: {input_ids[0].tolist()}")
-    print(f"Test 3: Padding indices in sequence 0: {padding_indices_seq0}")
+    # Find padding in encoder input for the first source sentence
+    encodings = encoder.tokenizer(test_src, padding='longest', return_tensors='pt').to(device)
+    input_ids_src = encodings['input_ids']
+    src_padding_token_id = encoder.padding_token_id
+    is_padding_in_src0 = (input_ids_src[0] == src_padding_token_id)
+    src_padding_indices_seq0 = torch.where(is_padding_in_src0)[0].tolist()
+    non_padding_indices_src0 = torch.where(~is_padding_in_src0)[0].tolist()
 
-    if not non_padding_indices_seq0:
-        print(
-            "Test 3 Warning: Sequence 0 consists only of padding/special tokens. Cannot test attention."
-        )
+    print(f"Test 3: Source 0 Input IDs: {input_ids_src[0].tolist()}")
+    print(f"Test 3: Padding indices in source 0: {src_padding_indices_seq0}")
+
+    if not non_padding_indices_src0:
+        print("Test 3 Warning: Source 0 is all padding. Cannot test.")
         return
-    if not padding_indices_seq0:
-        print("Test 3 Skipped: No padding occurred in sequence 0 for this batch.")
+    if not src_padding_indices_seq0:
+        print("Test 3 Skipped: No padding occurred in source 0.")
         return
 
-    first_non_padding_idx_seq0 = non_padding_indices_seq0[
-        0
-    ]  # Index of first real token
-    print(
-        f"Test 3: First non-padding index in sequence 0: {first_non_padding_idx_seq0}"
-    )
+    # Run forward requesting weights
+    _, _, cross_attn_weights = run_transformer(transformer, test_src, test_tgt, return_weights=True)
 
-    # Run forward pass requesting attention weights from the last layer
-    _, last_attn_weights = run_encoder(encoder, test_texts, return_weights=True)
+    assert cross_attn_weights is not None, "Test 3 Failed: Did not receive cross-attention weights."
 
-    assert (
-        last_attn_weights is not None
-    ), "Test 3 Failed: Did not receive attention weights."
+    # Check cross-attention weights for the FIRST target token in the FIRST sequence
+    # looking at the ENCODER PADDING positions
+    # cross_attn_weights shape: (batch, heads, TgtSeqLen, SrcSeqLen)
+    query_pos = 0 # First target token
+    attn_weights_for_tgt_token = cross_attn_weights[0, :, query_pos, :] # (heads, SrcSeqLen)
 
-    # Check attention weights for the FIRST non-padding token in the FIRST sequence
-    query_token_idx = first_non_padding_idx_seq0
-    attn_weights_for_token = last_attn_weights[
-        0, :, query_token_idx, :
-    ]  # (num_heads, seq_len_k)
+    # Get weights assigned to padded source positions
+    weights_on_src_padding = attn_weights_for_tgt_token[:, src_padding_indices_seq0] # (heads, num_src_padding)
 
-    # Get the weights specifically for the padded key positions
-    weights_on_padding = attn_weights_for_token[
-        :, padding_indices_seq0
-    ]  # (num_heads, num_padding_tokens)
+    # Check sums
+    sum_of_weights = attn_weights_for_tgt_token.sum(dim=-1)
+    assert torch.allclose(sum_of_weights, torch.ones_like(sum_of_weights), atol=1e-5), \
+        f"Test 3 Failed: Cross-Attention weights for target query {query_pos} do not sum to 1."
+    print("Test 3: Cross-Attention weights sum to 1.")
 
-    # Check if attention weights sum to 1 (basic check for softmax)
-    sum_of_weights = attn_weights_for_token.sum(dim=-1)  # Sum across keys for each head
-    assert torch.allclose(
-        sum_of_weights, torch.ones_like(sum_of_weights), atol=1e-5
-    ), f"Test 3 Failed: Attention weights for query {query_token_idx} do not sum to 1."
-    print("Test 3: Attention weights sum to 1 (checked for one token).")
-
-    # Check if all weights on padding are close to zero
-    max_weight_on_padding = (
-        torch.max(weights_on_padding).item() if weights_on_padding.numel() > 0 else 0.0
-    )
-    print(
-        f"Test 3: Max attention weight on padding tokens (for query token {query_token_idx}): {max_weight_on_padding:.2E}"
-    )  # Scientific notation
+    # Check weights on padding
+    max_weight_on_padding = torch.max(weights_on_src_padding).item() if weights_on_src_padding.numel() > 0 else 0.0
+    print(f"Test 3: Max cross-attention weight on source padding (for target token {query_pos}): {max_weight_on_padding:.2E}")
 
     padding_ignored = max_weight_on_padding < 1e-6
-    assert (
-        padding_ignored
-    ), f"Test 3 Failed: Significant attention weight ({max_weight_on_padding:.2E}) found on padding tokens!"
-    print("Test 3 Passed: Padding tokens correctly ignored by attention.")
+    assert padding_ignored, f"Test 3 Failed: Significant cross-attention weight ({max_weight_on_padding:.2E}) found on source padding!"
+    print("Test 3 Passed: Encoder padding correctly ignored by cross-attention.")
 
 
-def test_positional_encoding_effect():
-    print("\n--- Test 4: Positional Encoding Effect (Conceptual Check) ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_TEST_LAYERS, device=device)
-    test_texts = ["A test sentence long enough for comparison."]
-    encoder_output, _ = run_encoder(encoder, test_texts)
+def test_causal_mask_effectiveness():
+    print("\n--- Test 4: Causal Mask Effectiveness (Decoder Self-Attention) ---")
+    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
+    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
+    transformer = Transformer(encoder, decoder, projection).to(device)
 
-    if encoder_output.shape[1] > 1:  # If sequence length > 1
-        output_token0 = encoder_output[0, 0, :]  # First token, first sequence
-        output_token1 = encoder_output[0, 1, :]  # Second token, first sequence
-        are_different = not torch.allclose(output_token0, output_token1, atol=1e-6)
-        print(
-            f"Test 4: Output for token 0 and token 1 in the same sequence are different: {are_different}"
-        )
-        assert (
-            are_different
-        ), "Test 4 Failed: Output for adjacent tokens is identical. Check PE or attention."
-        print("Test 4 Passed: Adjacent tokens have different representations.")
-    else:
-        print("Test 4 Skipped: Sequence length is 1.")
+    test_src = ["A source sentence."] # Only need one source
+    test_tgt_len = 6
+    test_tgt = torch.randint(1, 500, (len(test_src), test_tgt_len), device=device) # No padding needed here
+
+    # Run forward requesting weights
+    _, self_attn_weights, _ = run_transformer(transformer, test_src, test_tgt, return_weights=True)
+
+    assert self_attn_weights is not None, "Test 4 Failed: Did not receive self-attention weights."
+
+    # Check weights for a token attending to FUTURE tokens
+    # self_attn_weights shape: (batch, heads, TgtSeqLen, TgtSeqLen)
+    # Example: Check weights for query token at position 1 (second token)
+    query_pos = 1
+    if test_tgt_len <= query_pos:
+        print("Test 4 Skipped: Sequence too short to test causal mask effectively.")
+        return
+
+    attn_weights_for_token = self_attn_weights[0, :, query_pos, :] # (heads, TgtSeqLen)
+
+    # Indices of future tokens (key positions > query_pos)
+    future_indices = list(range(query_pos + 1, test_tgt_len))
+
+    if not future_indices:
+        print(f"Test 4 Skipped: No future tokens to check for query position {query_pos}.")
+        return
+
+    # Get weights assigned to future key positions
+    weights_on_future = attn_weights_for_token[:, future_indices] # (heads, num_future_tokens)
+
+    # Check sums
+    sum_of_weights = attn_weights_for_token.sum(dim=-1)
+    assert torch.allclose(sum_of_weights, torch.ones_like(sum_of_weights), atol=1e-5), \
+        f"Test 4 Failed: Self-Attention weights for target query {query_pos} do not sum to 1."
+    print("Test 4: Self-Attention weights sum to 1.")
+
+    # Check weights on future positions
+    max_weight_on_future = torch.max(weights_on_future).item() if weights_on_future.numel() > 0 else 0.0
+    print(f"Test 4: Max self-attention weight on future tokens (for query token {query_pos}): {max_weight_on_future:.2E}")
+
+    causality_maintained = max_weight_on_future < 1e-6
+    assert causality_maintained, f"Test 4 Failed: Significant self-attention weight ({max_weight_on_future:.2E}) found on future tokens!"
+    print("Test 4 Passed: Causal mask correctly prevents attention to future tokens.")
 
 
-def test_gradient_flow():
-    print("\n--- Test 5: Gradient Flow Check ---")
-    # Use config with dropout > 0 to ensure dropout layers are active
+def test_transformer_gradient_flow():
+    print("\n--- Test 5: Transformer Gradient Flow Check ---")
     grad_config = TEST_CONFIG.copy()
-    grad_config["dropout"] = 0.1
-    encoder = Encoder(config=grad_config, n_layers=NUM_TEST_LAYERS, device=device)
-    # Ensure model is in training mode for dropout and gradient calculation
-    encoder.train()
+    grad_config["dropout"] = 0.1 # Ensure dropout is non-zero
+    encoder = Encoder(config=grad_config, n_layers=NUM_ENC_LAYERS, device=device)
+    decoder = Decoder(grad_config["target_vocab_size"], grad_config["d_model"], NUM_DEC_LAYERS, grad_config["num_heads"], grad_config["d_ff"], grad_config["dropout"], grad_config["max_len_pe"], device)
+    projection = ProjectionLayer(grad_config["d_model"], grad_config["target_vocab_size"], device)
+    transformer = Transformer(encoder, decoder, projection).to(device)
+    transformer.train() # Set to training mode
 
-    test_texts = ["Test sequence for gradients."]
-    # No torch.no_grad() here
-    encoder_output, _ = encoder(test_texts)
+    test_src = ["Test sequence for gradients."]
+    test_tgt = torch.randint(1, 500, (len(test_src), 5), device=device) # Dummy target
 
-    # Simple dummy loss
-    loss = encoder_output.mean()  # Use mean instead of sum for stability
+    # Forward pass (no torch.no_grad())
+    logits, _, _ = transformer(test_src, test_tgt)
+
+    # Dummy loss
+    loss = logits.mean()
     print(f"Test 5: Calculated dummy loss: {loss.item()}")
 
     # Backpropagate
     loss.backward()
 
-    # Check if gradients exist for parameters
-    found_grad = False
-    no_grad_params = []
-    for name, param in encoder.named_parameters():
-        if param.requires_grad:
-            if param.grad is not None:
-                found_grad = True
-                # Optional: Check magnitude, but just checking existence is often enough
-                # print(f"  Grad found for: {name}, Max value: {param.grad.abs().max().item()}")
-            else:
-                no_grad_params.append(name)
+    # Check gradients exist for parameters in all components
+    components = {'encoder': encoder, 'decoder': decoder, 'projection': projection}
+    all_grads_ok = True
+    for comp_name, component in components.items():
+        found_grad_comp = False
+        no_grad_params_comp = []
+        print(f"  Checking gradients for: {comp_name}")
+        for name, param in component.named_parameters():
+            if param.requires_grad:
+                if param.grad is not None and param.grad.abs().sum() > 0: # Check non-zero grad sum
+                    found_grad_comp = True
+                elif param.grad is None:
+                     no_grad_params_comp.append(name)
+                # else: grad is all zeros, might be okay but less informative
 
-    if not found_grad:
-        raise AssertionError("Test 5 Failed: No gradients found for any parameter!")
-    if no_grad_params:
-        print(f"Test 5 Warning: No gradients found for parameters: {no_grad_params}")
-        # This might be okay if e.g. parts of the model were frozen, but unexpected here.
-    else:
-        print("Test 5 Passed: Gradients flowed back to parameters.")
+        if not found_grad_comp:
+            print(f"  Test 5 FAILED for {comp_name}: No non-zero gradients found!")
+            all_grads_ok = False
+        if no_grad_params_comp:
+            print(f"  Test 5 Warning ({comp_name}): No gradients found for parameters: {no_grad_params_comp}")
+        # else: # Optional verbose success
+            # print(f"  Test 5 OK for {comp_name}: Gradients found.")
+
+    assert all_grads_ok, "Test 5 Failed: Gradients did not flow back correctly to all components."
+    print("Test 5 Passed: Gradients flowed back to parameters in Encoder, Decoder, and Projection.")
 
 
 # --- Run Tests ---
 if __name__ == "__main__":
-    test_forward_pass_shape()
-    test_batch_independence()
-    test_padding_mask_effectiveness()
-    test_positional_encoding_effect()
-    test_gradient_flow()
-    print("\n--- All Tests Completed ---")
+    # Make sure model.py is saved with the modifications for returning weights
+    try:
+        test_transformer_forward_shape()
+        test_transformer_batch_independence()
+        test_encoder_padding_in_cross_attn()
+        test_causal_mask_effectiveness()
+        test_transformer_gradient_flow()
+        print("\n--- All Transformer Tests Completed Successfully ---")
+    except AssertionError as e:
+        print(f"\n--- TEST FAILED ---")
+        print(e)
+    except Exception as e:
+        print(f"\n--- UNEXPECTED ERROR DURING TESTING ---")
+        print(e)
+        import traceback
+        traceback.print_exc()
