@@ -1,54 +1,68 @@
-
 import math
 from typing import Optional, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-from transformers import AutoTokenizer, PreTrainedTokenizerFast # Import from transformers
+device = torch.device(
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+from transformers import (
+    AutoTokenizer,
+    PreTrainedTokenizerFast,
+)  # Import from transformers
 
 DEFAULT_TOKENIZER_NAME = "bert-base-uncased"
 
 
 class InputEmbedding(nn.Module):
-    def __init__(self, d_model: int, 
-                 tokenizer_name: str,
-                 device: torch.device = device,
-                 max_length:Optional[int] = None):
+    def __init__(
+        self,
+        d_model: int,
+        tokenizer_name: str,
+        device: torch.device = device,
+        max_length: Optional[int] = None,
+    ):
         super().__init__()
         self.d_model = d_model
         self.device = device
-        self.max_length = max_length # Store max_length
+        self.max_length = max_length  # Store max_length
 
         # Load the tokenizer
         # Using PreTrainedTokenizerFast for type hinting, common base class
-        self.tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(tokenizer_name)
-        
+        self.tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
+            tokenizer_name
+        )
+
         # --- Handle Padding Token ---
         if self.tokenizer.pad_token is None:
-            print(f"Warning: Tokenizer '{tokenizer_name}' does not have a default pad token. Adding '[PAD]'.")
+            print(
+                f"Warning: Tokenizer '{tokenizer_name}' does not have a default pad token. Adding '[PAD]'."
+            )
             # Common practice: add a pad token if missing, often EOS token is used if available
             # For simplicity here, adding a generic '[PAD]' token.
             # Might need to resize model embeddings if adding tokens to a pre-trained model.
-            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
             # NOTE: If I were fine-tuning a pre-trained model, I'd also need to resize
             # the model's token embeddings matrix: model.resize_token_embeddings(len(tokenizer))
 
         self.padding_token_id = self.tokenizer.pad_token_id
-        self.vocab_size = self.tokenizer.vocab_size # Get vocab size from HF tokenizer
+        self.vocab_size = self.tokenizer.vocab_size  # Get vocab size from HF tokenizer
 
         print(f"InputEmbedding: Loaded Tokenizer '{tokenizer_name}'")
-        print(f"InputEmbedding: Vocab Size = {self.vocab_size}, Padding ID = {self.padding_token_id}")
+        print(
+            f"InputEmbedding: Vocab Size = {self.vocab_size}, Padding ID = {self.padding_token_id}"
+        )
 
         # Initialize the embedding layer
         self.embedding = nn.Embedding(
             num_embeddings=self.vocab_size,
             embedding_dim=d_model,
-            padding_idx=self.padding_token_id, # Inform nn.Embedding about the padding index
-            device=device
+            padding_idx=self.padding_token_id,  # Inform nn.Embedding about the padding index
+            device=device,
         )
-
 
     def forward(self, input_texts: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -74,23 +88,29 @@ class InputEmbedding(nn.Module):
         # This handles tokenization, adding special tokens, padding, truncation,
         # and tensor conversion in one go.
         tokenizer_args = {
-            'text': input_texts,
-            'add_special_tokens': True, # Add [CLS], [SEP] etc. (depends on tokenizer type)
-            'padding': 'longest' if self.max_length is None else 'max_length', # Pad to longest in batch or to max_length
-            'truncation': self.max_length is not None, # Truncate if max_length is specified
-            'max_length': self.max_length, # Set max_length if provided
-            'return_tensors': 'pt', # Return PyTorch tensors
-            'return_attention_mask': True # Get the attention mask
+            "text": input_texts,
+            "add_special_tokens": True,  # Add [CLS], [SEP] etc. (depends on tokenizer type)
+            "padding": (
+                "longest" if self.max_length is None else "max_length"
+            ),  # Pad to longest in batch or to max_length
+            "truncation": self.max_length
+            is not None,  # Truncate if max_length is specified
+            "max_length": self.max_length,  # Set max_length if provided
+            "return_tensors": "pt",  # Return PyTorch tensors
+            "return_attention_mask": True,  # Get the attention mask
         }
         encoding = self.tokenizer(**tokenizer_args).to(self.device)
 
-        input_ids_tensor = encoding['input_ids'] # Shape: (batch_size, seq_len)
-        attention_mask_tensor = encoding['attention_mask'] # Shape: (batch_size, seq_len), 1 for real, 0 for padding
+        input_ids_tensor = encoding["input_ids"]  # Shape: (batch_size, seq_len)
+        attention_mask_tensor = encoding[
+            "attention_mask"
+        ]  # Shape: (batch_size, seq_len), 1 for real, 0 for padding
 
         current_seq_len = input_ids_tensor.shape[1]
         print(f"InputEmbedding: Tokenized IDs tensor shape = {input_ids_tensor.shape}")
-        print(f"InputEmbedding: Attention mask tensor shape = {attention_mask_tensor.shape}")
-
+        print(
+            f"InputEmbedding: Attention mask tensor shape = {attention_mask_tensor.shape}"
+        )
 
         # 2. Create padding mask for attention mechanism
         # I'll need mask to be True where attention should be inhibited (padding tokens)
@@ -98,14 +118,16 @@ class InputEmbedding(nn.Module):
         # So, I'll create the mask where attention_mask == 0.
         # Shape: (batch_size, seq_len) -> (batch_size, 1, 1, seq_len)
         padding_mask = (attention_mask_tensor == 0).unsqueeze(1).unsqueeze(2)
-        print(f"InputEmbedding: Padding mask shape for attention = {padding_mask.shape}")
-
+        print(
+            f"InputEmbedding: Padding mask shape for attention = {padding_mask.shape}"
+        )
 
         # 3. Get embeddings (single operation for the whole batch)
         # Shape: (batch_size, seq_len, d_model)
         embeddings = self.embedding(input_ids_tensor)
-        print(f"InputEmbedding: Embeddings tensor shape (before scaling) = {embeddings.shape}")
-
+        print(
+            f"InputEmbedding: Embeddings tensor shape (before scaling) = {embeddings.shape}"
+        )
 
         # 4. Scale embeddings (common practice, mentioned in "Attention Is All You Need")
         embeddings = embeddings * math.sqrt(self.d_model)
@@ -144,12 +166,13 @@ class PositionalEncoding(nn.Module):
     using the sine and cosine functions described in "Attention Is All You Need".
     It uses register_buffer to store the encoding matrix efficiently.
     """
+
     def __init__(
         self,
         d_model: int,
         dropout: float,
-        max_len: int = 5000, # Maximum possible sequence length
-        device: torch.device = device
+        max_len: int = 5000,  # Maximum possible sequence length
+        device: torch.device = device,
     ):
         """
         Initializes the PositionalEncoding layer.
@@ -172,15 +195,20 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, d_model, device=self.device)
 
         # Position indices: (max_len, 1)
-        position = torch.arange(0, max_len, dtype=torch.float, device=self.device).unsqueeze(1)
+        position = torch.arange(
+            0, max_len, dtype=torch.float, device=self.device
+        ).unsqueeze(1)
 
         # Calculate the division term: (d_model / 2)
         # Formula: 1 / (10000^(2i / d_model)) -> log space -> exp(- (2i / d_model) * log(10000))
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float, device=self.device) * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float, device=self.device)
+            * (-math.log(10000.0) / d_model)
+        )
 
         # Calculate sine for even indices and cosine for odd indices
-        pe[:, 0::2] = torch.sin(position * div_term) # Apply to even columns
-        pe[:, 1::2] = torch.cos(position * div_term) # Apply to odd columns
+        pe[:, 0::2] = torch.sin(position * div_term)  # Apply to even columns
+        pe[:, 1::2] = torch.cos(position * div_term)  # Apply to odd columns
 
         # Add a batch dimension for broadcasting: (1, max_len, d_model)
         pe = pe.unsqueeze(0)
@@ -188,8 +216,10 @@ class PositionalEncoding(nn.Module):
         # Register 'pe' as a buffer. Buffers are model state like parameters,
         # but are not updated by the optimizer. They are saved with the model
         # and moved to the correct device automatically with .to(device).
-        self.register_buffer('pe', pe)
-        print(f"PositionalEncoding: Pre-computed 'pe' buffer with shape {self.pe.shape}")
+        self.register_buffer("pe", pe)
+        print(
+            f"PositionalEncoding: Pre-computed 'pe' buffer with shape {self.pe.shape}"
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -209,18 +239,18 @@ class PositionalEncoding(nn.Module):
 
         # Ensure seq_len does not exceed max_len
         if seq_len > self.max_len:
-             raise ValueError(
-                 f"Input sequence length ({seq_len}) exceeds the maximum "
-                 f"sequence length ({self.max_len}) this PositionalEncoding "
-                 f"was initialized with."
-             )
+            raise ValueError(
+                f"Input sequence length ({seq_len}) exceeds the maximum "
+                f"sequence length ({self.max_len}) this PositionalEncoding "
+                f"was initialized with."
+            )
 
         # Add the pre-computed positional encoding.
         # We take only the first 'seq_len' positions from the pre-computed matrix.
         # self.pe shape: (1, max_len, d_model)
         # Sliced pe shape: (1, seq_len, d_model)
         # This will broadcast correctly across the batch dimension of x.
-        x = x + self.pe[:, :seq_len, :] # Add positional encoding
+        x = x + self.pe[:, :seq_len, :]  # Add positional encoding
 
         # Apply dropout
         return self.dropout(x)
@@ -292,16 +322,18 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
             # Expected mask shape: (batch_size, 1, 1, seq_len_k)
             mask = mask.to(device)
             if mask.shape != (batch_size, 1, 1, key.shape[2]):
-                 # Attempt to broadcast if needed, or raise error
-                 # This simple check assumes mask is for key padding
-                 try:
-                     # Example: if mask is (batch_size, 1, seq_len_k) -> add head dim
-                     if mask.dim() == 3 and mask.shape[1] == 1:
-                         mask = mask.unsqueeze(1) # -> (batch, 1, 1, seq_len_k)
-                     # Add more sophisticated checks if needed
-                     assert mask.shape == (batch_size, 1, 1, key.shape[2])
-                 except AssertionError:
-                     raise ValueError(f"Mask shape {mask.shape} is incompatible with attention scores shape {attn_scores.shape}. Expected ({batch_size}, 1, 1, {key.shape[2]})")
+                # Attempt to broadcast if needed, or raise error
+                # This simple check assumes mask is for key padding
+                try:
+                    # Example: if mask is (batch_size, 1, seq_len_k) -> add head dim
+                    if mask.dim() == 3 and mask.shape[1] == 1:
+                        mask = mask.unsqueeze(1)  # -> (batch, 1, 1, seq_len_k)
+                    # Add more sophisticated checks if needed
+                    assert mask.shape == (batch_size, 1, 1, key.shape[2])
+                except AssertionError:
+                    raise ValueError(
+                        f"Mask shape {mask.shape} is incompatible with attention scores shape {attn_scores.shape}. Expected ({batch_size}, 1, 1, {key.shape[2]})"
+                    )
 
             # print(f"SDPA - Applying mask with shape: {mask.shape}")
             # Mask should be True where we want to mask *out* (padding)
@@ -321,8 +353,10 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         v_encodings: torch.Tensor,
         mask=None,
         return_weights: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]: # return attention weights if requested
-        
+    ) -> Tuple[
+        torch.Tensor, Optional[torch.Tensor]
+    ]:  # return attention weights if requested
+
         q_batch_size, q_seq_len, _ = q_encodings.shape
         k_batch_size, k_seq_len, _ = k_encodings.shape
         v_batch_size, v_seq_len, _ = v_encodings.shape
@@ -337,12 +371,16 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
         # (batch, seq_length, d_model) -> (batch, seq_length, d_model)
         v = self.W_v(v_encodings)
 
-        query = q.view(q_batch_size, q_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        query = q.view(q_batch_size, q_seq_len, self.num_heads, self.d_k).transpose(
+            1, 2
+        )
         # ========================== ↑ Query Tensor Reshape Logic ↑ ==========================
         # (batch, seq_length, d_model) {view} -> (batch, seq_length, num_heads, d_k) {transpose} -> (batch, num_heads, seq_length, d_k)
 
         key = k.view(k_batch_size, k_seq_len, self.num_heads, self.d_k).transpose(1, 2)
-        value = v.view(v_batch_size, v_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        value = v.view(v_batch_size, v_seq_len, self.num_heads, self.d_k).transpose(
+            1, 2
+        )
 
         # shape of output => (batch, num_heads, seq_length, d_k)
         output, attn_weights = MultiHeadAttention.scaled_dot_product_attention(
@@ -361,9 +399,9 @@ Model dim: {d_model}, Number of heads: {num_heads}"""
 
         final_output = self.W_o(H)
         if return_weights:
-            return final_output, attn_weights # Return weights if requested
+            return final_output, attn_weights  # Return weights if requested
         else:
-            return final_output, None # Return None for weights otherwise
+            return final_output, None  # Return None for weights otherwise
 
 
 class ResidualConnection(nn.Module):
@@ -571,7 +609,9 @@ class EncoderBlock(nn.Module):
             ]
         )
 
-    def forward(self, x, mask, return_attn_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self, x, mask, return_attn_weights: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass for the encoder block.
 
@@ -586,12 +626,18 @@ class EncoderBlock(nn.Module):
                 - Attention weights tensor if return_attn_weights is True, else None.
         """
         mha_sublayer = lambda x_residual: self.self_attn_block(
-            x_residual, x_residual, x_residual, mask, return_weights=return_attn_weights # Pass flag
+            x_residual,
+            x_residual,
+            x_residual,
+            mask,
+            return_weights=return_attn_weights,  # Pass flag
         )
 
         # Need to handle the tuple output (output, weights) from mha_sublayer
         attn_block_input = x
-        attn_raw_output, attn_weights = mha_sublayer(attn_block_input) # Get both outputs
+        attn_raw_output, attn_weights = mha_sublayer(
+            attn_block_input
+        )  # Get both outputs
 
         # first connection (mha + dropout + residual)
         x = self.residual_connections[0].norm(
@@ -609,7 +655,7 @@ class EncoderBlock(nn.Module):
             ff_block_input + self.residual_connections[1].dropout(ff_raw_output)
         )
 
-        return x, attn_weights # Return final output and weights (or None)
+        return x, attn_weights  # Return final output and weights (or None)
 
 
 class Encoder(nn.Module):
@@ -619,6 +665,7 @@ class Encoder(nn.Module):
     Handles input embedding, positional encoding, and passes the data
     through multiple EncoderBlock layers.
     """
+
     def __init__(self, config: dict, n_layers: int = 6, device: torch.device = device):
         """
         Initializes the Encoder stack.
@@ -638,15 +685,17 @@ class Encoder(nn.Module):
         # Input processing layers
         self.input_embedding = InputEmbedding(
             d_model=config["d_model"],
-            tokenizer_name=config.get("tokenizer_name", DEFAULT_TOKENIZER_NAME), # Get from config or use default
+            tokenizer_name=config.get(
+                "tokenizer_name", DEFAULT_TOKENIZER_NAME
+            ),  # Get from config or use default
             device=device,
-            max_length=config.get("max_length", None) # Allow fixed length via config
+            max_length=config.get("max_length", None),  # Allow fixed length via config
         )
         self.positional_encoding = PositionalEncoding(
             d_model=config["d_model"],
             dropout=config["dropout"],
-            max_len=config.get("max_len_pe", 5000), # Max length for PE matrix
-            device=device
+            max_len=config.get("max_len_pe", 5000),  # Max length for PE matrix
+            device=device,
         )
 
         # Create a stack of n_layers encoder blocks
@@ -667,18 +716,20 @@ class Encoder(nn.Module):
         )
         feed_forward = FeedForward(
             d_model=self.config["d_model"],
-            d_ff=self.config.get("d_ff", 2048), # Default d_ff
+            d_ff=self.config.get("d_ff", 2048),  # Default d_ff
             dropout=self.config["dropout"],
             device=self.device,
         )
         return EncoderBlock(
-            config=self.config, # Pass config down if needed by block/sublayers
+            config=self.config,  # Pass config down if needed by block/sublayers
             self_attn_block=self_attn,
             feed_forward_block=feed_forward,
             device=self.device,
         )
 
-    def forward(self, input_texts: List[str], return_last_layer_attn_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self, input_texts: List[str], return_last_layer_attn_weights: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass for the entire Encoder stack.
 
@@ -696,26 +747,32 @@ class Encoder(nn.Module):
         # embeddings: (batch, seq_len, d_model)
         # padding_mask: (batch, 1, 1, seq_len), True for padding
         embeddings, padding_mask = self.input_embedding(input_texts)
-        print(f"Encoder.forward: Embeddings shape: {embeddings.shape}, Padding Mask shape: {padding_mask.shape}")
+        print(
+            f"Encoder.forward: Embeddings shape: {embeddings.shape}, Padding Mask shape: {padding_mask.shape}"
+        )
 
         # 2. Add positional encoding
         x = self.positional_encoding(embeddings)
         print(f"Encoder.forward: After Positional Encoding shape: {x.shape}")
-        
-        last_layer_attn_weights = None # Initialize to None
+
+        last_layer_attn_weights = None  # Initialize to None
 
         # 3. Pass through each encoder block layer
         for i, layer in enumerate(self.layers):
             # Request weights only from the last layer if needed
-            request_weights_from_layer = return_last_layer_attn_weights and (i == self.n_layers - 1)
-            x, attn_weights = layer(x, padding_mask, return_attn_weights=request_weights_from_layer)
+            request_weights_from_layer = return_last_layer_attn_weights and (
+                i == self.n_layers - 1
+            )
+            x, attn_weights = layer(
+                x, padding_mask, return_attn_weights=request_weights_from_layer
+            )
             print(f"Encoder.forward: After Layer {i+1} shape: {x.shape}")
             if request_weights_from_layer:
                 last_layer_attn_weights = attn_weights
 
         print(f"Encoder.forward: Final Output shape: {x.shape}")
         return x, last_layer_attn_weights
-    
+
     # Exposing tokenizer for testing convenience
     @property
     def tokenizer(self):
@@ -725,4 +782,3 @@ class Encoder(nn.Module):
     @property
     def padding_token_id(self):
         return self.input_embedding.padding_token_id
-
