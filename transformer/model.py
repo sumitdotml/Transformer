@@ -518,6 +518,9 @@ class LayerNorm(nn.Module):
         var_x = torch.var(x, dim=-1, keepdim=True, unbiased=False)
         normalized_x = (x - mean_x) / torch.sqrt(var_x + self.epsilon)
         return self.gamma * normalized_x + self.beta
+    
+    # NOTE: I could just use nn.LayerNorm, but I implemented it myself to understand it better.
+    # nn.LayerNorm is probably better if I'm using it for more serious projects.
 
 
 class FeedForward(nn.Module):
