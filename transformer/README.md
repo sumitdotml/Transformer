@@ -22,7 +22,6 @@ When running the visualization script, it generated several visualization files:
 
 - `attention_patterns.png`: Shows the attention patterns across different heads
 - `positional_encoding.png`: Displays the positional encoding patterns
-- `output_comparison.png`: Compares input and output lengths for various texts
 
 The demonstration shows that the model can:
 
@@ -33,6 +32,14 @@ The demonstration shows that the model can:
 
 Since this is an untrained model, the generated sequences aren't meaningful translations - they're just demonstrating the functionality of the architecture itself. With proper training, this model could be used for translation, summarization, or other sequence-to-sequence tasks.
 
+I did try the quick demo with a small sample of the WMT14 dataset; it's not good and it's totally expected since the training was done with cpu and took only a minute or so.
+
+![Quick Demo Training History](./demo/training_history.png)
+<a href="./demo/training_history.png">Quick Demo Training History</a>
+
+![Quick Demo](../assets/demo-screenshot.png)
+<a href="../assets/demo-screenshot.png">Demo Screenshot</a>
+
 ## TODO: Original Paper Replication
 
 - [x] Multi-head attention with encoded embeddings
@@ -40,10 +47,10 @@ Since this is an untrained model, the generated sequences aren't meaningful tran
 - [x] Add & Norm
 - [x] Residual connection
 - [x] Encoder
-- [ ] Decoder
-- [ ] Connection between encoder and decoder
-- [ ] Create a working architecture with a simple string as input
-- [ ] Expand the architecture to work with batches
+- [x] Decoder
+- [x] Connection between encoder and decoder
+- [x] Create a working architecture with a simple string as input
+- [x] Expand the architecture to work with batches
 - [ ] Dataset, DataLoader, etc.
 - [ ] Training loop
 - [ ] Evaluation metrics

@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import os
 
 # Import our simplified transformer
 from config import get_config
@@ -199,7 +199,7 @@ def main():
         # Translate example
         if epoch % 1 == 0:
             example = dataset[0]["translation"]["en"]
-            translate_example(model, tokenizer, example, "de")
+            translate_example(model,    tokenizer, example, "de")
             
     # Plot training history
     plt.figure(figsize=(10, 5))
@@ -209,12 +209,18 @@ def main():
     plt.ylabel("Loss")
     plt.title("Training History")
     plt.legend()
-    plt.savefig("training_history.png")
-    print("Training history saved to training_history.png")
+
+    demo_dir = "transformer/demo"
+    if not os.path.exists(demo_dir):
+        os.makedirs(demo_dir)
+    plt.savefig(os.path.join(demo_dir, "training_history.png") if not os.path.exists(os.path.join(demo_dir, "training_history.png")) else None)
+    print(f"Training history saved to {os.path.join(demo_dir, 'training_history.png')}")
     
     # Save trained model
-    torch.save(model.state_dict(), "transformer_model.pth")
-    print("Model saved to transformer_model.pth")
+    model_path = os.path.join(demo_dir, "transformer_model.pth")
+    if not os.path.exists(model_path):
+        torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
     
     # Demonstrate translation with the trained model
     print("\nTranslation examples:")
