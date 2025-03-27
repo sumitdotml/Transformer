@@ -1,5 +1,5 @@
 import math
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -581,56 +581,38 @@ class FeedForward(nn.Module):
 class EncoderBlock(nn.Module):
     """
     Transformer encoder block (individual unit in the encoder stack).
-
+    
     This block processes already embedded inputs and applies:
     1. Multi-head self-attention with residual connection and layer normalization
     2. Feed-forward network with residual connection and layer normalization
-
+    
     It does NOT handle tokenization or embedding - that's the Encoder's job.
     """
 
     def __init__(
         self,
-        config: dict,
         self_attn_block: MultiHeadAttention,
         feed_forward_block: FeedForward,
+        residual_connections: nn.ModuleList,
         device: torch.device = device,
     ) -> None:
         super().__init__()
-        self.config = config
         self.device = device
-
         self.self_attn_block = self_attn_block
         self.feed_forward_block = feed_forward_block
-        """
-        Here, `self_attn_block` and `feed_forward_block` are arguments to the
-        `__init__` method. This means that when I create an `Encoder` object
-        (e.g. `encoder = Encoder(config, self_attn_block, feed_forward_block, device)`),
-        I am required to provide pre-existing instances of `MultiHeadAttention`
-        and `FeedForward`. The `Encoder` class itself is not responsible for
-        creating these objects. It depends on them being created and passed
-        in from the outside. This is "dependency injection" - I am "injecting"
-        the dependencies (MultiHeadAttention, FeedForward) into the Encoder.
-        """
-
-        self.residual_connections = nn.ModuleList(
-            [
-                ResidualConnection(config["dropout"], config["d_model"], device=device)
-                for _ in range(2)
-            ]
-        )
+        self.residual_connections = residual_connections
 
     def forward(
         self, x, mask, return_attn_weights: bool = False
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass for the encoder block.
-
+        
         Args:
             x (torch.Tensor): Input tensor of shape [batch, seq_len, d_model].
             mask (torch.Tensor): Padding mask of shape [batch, 1, 1, seq_len].
             return_attn_weights (bool): If True, return attention weights from MHA.
-
+            
         Returns:
             Tuple[torch.Tensor, Optional[torch.Tensor]]:
                 - Output tensor of the same shape as input.
@@ -677,70 +659,108 @@ class Encoder(nn.Module):
     through multiple EncoderBlock layers.
     """
 
-    def __init__(self, config: dict, n_layers: int = 6, device: torch.device = device):
+    def __init__(
+        self, 
+        input_embedding: InputEmbedding,
+        positional_encoding: PositionalEncoding,
+        layers: nn.ModuleList,
+        device: torch.device = device
+    ):
         """
         Initializes the Encoder stack.
-
+        
         Args:
-            config (dict): Configuration dictionary containing parameters like:
-                           'd_model', 'tokenizer_name', 'dropout', 'max_len' (for PE),
-                           'num_heads', 'd_ff'.
-            n_layers (int): Number of EncoderBlocks to stack. Defaults to 6.
-            device (torch.device): The device to place tensors on.
+            input_embedding: Embedding layer for inputs
+            positional_encoding: Positional encoding layer
+            layers: List of encoder blocks
+            device: Device to run on
         """
         super().__init__()
-        self.config = config
         self.device = device
-        self.n_layers = n_layers
+        self.n_layers = len(layers)
 
         # Input processing layers
-        self.input_embedding = InputEmbedding(
-            d_model=config["d_model"],
-            tokenizer_name=config.get(
-                "tokenizer_name", DEFAULT_TOKENIZER_NAME
-            ),  # Getting from config or using default
+        self.input_embedding = input_embedding
+        self.positional_encoding = positional_encoding
+
+        # Stack of encoder blocks
+        self.layers = layers
+        
+    @classmethod
+    def from_config(cls, config: dict, n_layers: int = None) -> 'Encoder':
+        """
+        Create an Encoder instance from a configuration dictionary.
+        
+        Args:
+            config: Configuration dictionary with model parameters
+            n_layers: Override the number of layers (optional)
+            
+        Returns:
+            Encoder instance
+        """
+        n_layers = n_layers or config.get('n_encoder_layers', 6)
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        
+        # Create input embedding
+        input_embedding = InputEmbedding(
+            d_model=config['d_model'],
+            tokenizer_name=config['tokenizer_name'],
             device=device,
-            max_length=config.get("max_length", None),  # Allowing fixed length via config
+            max_length=config.get('max_length')
         )
-        self.positional_encoding = PositionalEncoding(
-            d_model=config["d_model"],
-            dropout=config["dropout"],
-            max_len=config.get("max_len_pe", 5000),  # Max length for PE matrix
-            device=device,
+        
+        # Create positional encoding
+        positional_encoding = PositionalEncoding(
+            d_model=config['d_model'],
+            dropout=config['dropout'],
+            max_len=config['max_len_pe'],
+            device=device
         )
-
-        # Creating a stack of n_layers encoder blocks
-        self.layers = nn.ModuleList(
-            [self._create_encoder_block() for _ in range(n_layers)]
-        )
-
-        # self._seq_length = None
-
-    def _create_encoder_block(self) -> EncoderBlock:
-        """Helper method to create a single EncoderBlock."""
-        self_attn = MultiHeadAttention(
-            num_heads=self.config["num_heads"],
-            d_model=self.config["d_model"],
-            # mask=None, # Mask is passed in forward so don't need to pass here
-            dropout=self.config["dropout"],
-            device=self.device,
-        )
-        feed_forward = FeedForward(
-            d_model=self.config["d_model"],
-            d_ff=self.config.get("d_ff", 2048),  # Default d_ff
-            dropout=self.config["dropout"],
-            device=self.device,
-        )
-        return EncoderBlock(
-            config=self.config,  # Passing config down if needed by block/sublayers
-            self_attn_block=self_attn,
-            feed_forward_block=feed_forward,
-            device=self.device,
+        
+        # Create encoder blocks
+        encoder_blocks = nn.ModuleList()
+        for _ in range(n_layers):
+            # Create self-attention
+            self_attn = MultiHeadAttention(
+                num_heads=config['num_heads'],
+                d_model=config['d_model'],
+                dropout=config['dropout'],
+                device=device
+            )
+            
+            # Create feed-forward network
+            feed_forward = FeedForward(
+                d_model=config['d_model'],
+                d_ff=config['d_ff'],
+                dropout=config['dropout'],
+                device=device
+            )
+            
+            # Create residual connections
+            residual_connections = nn.ModuleList([
+                ResidualConnection(config['dropout'], config['d_model'], device) 
+                for _ in range(2)
+            ])
+            
+            # Create and add encoder block
+            encoder_block = EncoderBlock(
+                self_attn_block=self_attn,
+                feed_forward_block=feed_forward,
+                residual_connections=residual_connections,
+                device=device
+            )
+            encoder_blocks.append(encoder_block)
+        
+        return cls(
+            input_embedding=input_embedding,
+            positional_encoding=positional_encoding,
+            layers=encoder_blocks,
+            device=device
         )
 
     def forward(
         self, input_texts: List[str], return_last_layer_attn_weights: bool = False
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the entire Encoder stack.
 
@@ -748,11 +768,11 @@ class Encoder(nn.Module):
             input_texts (List[str]): A batch of raw input strings.
             return_last_layer_attn_weights (bool): If True, return attention weights
                                              from the final EncoderBlock.
-
+            
         Returns:
-            Tuple[torch.Tensor, Optional[torch.Tensor]]:
+            Tuple[torch.Tensor, torch.Tensor]:
                 - The encoded output tensor of shape (batch_size, seq_len, d_model).
-                - Attention weights from the last layer if requested, else None.
+                - The padding mask for the encoder output
         """
         # 1. Getting embeddings and the padding mask
         # embeddings: (batch, seq_len, d_model)
@@ -782,7 +802,7 @@ class Encoder(nn.Module):
                 last_layer_attn_weights = attn_weights
 
         print(f"Encoder.forward: Final Output shape: {x.shape}")
-        return x, last_layer_attn_weights
+        return x, padding_mask
 
     # Exposing tokenizer for testing convenience
     @property
@@ -798,101 +818,196 @@ class Encoder(nn.Module):
 class DecoderBlock(nn.Module):
     """
     Single block for the Transformer Decoder stack.
-
-    Applies Masked Self-Attention, Cross-Attention, and Feed-Forward network,
-    each followed by Add & Norm (Post-LN).
+    
+    Applies three key operations in sequence:
+    1. Masked Self-Attention (prevents attending to future tokens)
+    2. Cross-Attention (connecting to encoder outputs)
+    3. Feed-Forward network
+    
+    Each operation is followed by Add & Norm (residual connection + layer normalization).
     """
     def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        d_ff: int,
-        dropout: float,
-        device: torch.device,
-    ):
+        self, 
+        masked_self_attn: MultiHeadAttention,
+        cross_attn: MultiHeadAttention,
+        feed_forward: FeedForward,
+        norm1: LayerNorm,
+        norm2: LayerNorm,
+        norm3: LayerNorm,
+        dropout: float
+    ) -> None:
         super().__init__()
-        self.masked_self_attn = MultiHeadAttention(num_heads, d_model, dropout, device)
-        self.cross_attn = MultiHeadAttention(num_heads, d_model, dropout, device)
-        self.feed_forward = FeedForward(d_model, d_ff, dropout, device)
-
-        self.norm1 = LayerNorm(d_model).to(device) # Ensuring LayerNorm is also moved to device if custom
-        self.norm2 = LayerNorm(d_model).to(device)
-        self.norm3 = LayerNorm(d_model).to(device)
+        
+        # Core processing modules
+        self.masked_self_attn = masked_self_attn
+        self.cross_attn = cross_attn
+        self.feed_forward = feed_forward
+        
+        # Layer normalization layers
+        self.norm1 = norm1
+        self.norm2 = norm2
+        self.norm3 = norm3
+        
+        # Dropout for residual connections
         self.dropout = nn.Dropout(dropout)
 
     def forward(
-        self,
-        x: torch.Tensor,                 # Target sequence embeddings (B, TgtSeqLen, D)
-        encoder_output: torch.Tensor,    # Encoder output (B, SrcSeqLen, D)
-        target_mask: torch.Tensor,       # Combined causal & padding mask for target (B, 1, TgtSeqLen, TgtSeqLen) or broadcastable
-        encoder_padding_mask: torch.Tensor,# Padding mask for encoder output (B, 1, 1, SrcSeqLen)
-        return_attn_weights: bool = False # ADDED parameter
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]: # MODIFIED return type
-        # Returning output, self_attn_weights, cross_attn_weights
-
-        # 1. Masked Self-Attention (Query, Key, Value are all x)
-        # Passing the return_weights flag down
+        self, 
+        x: torch.Tensor, 
+        encoder_output: torch.Tensor, 
+        target_mask: torch.Tensor, 
+        encoder_padding_mask: torch.Tensor, 
+        return_attn_weights: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Process target sequence through decoder block.
+        
+        Args:
+            x: Target embeddings [batch, tgt_len, d_model]
+            encoder_output: Output from encoder [batch, src_len, d_model]
+            target_mask: Prevents attending to future tokens [batch, 1, tgt_len, tgt_len]
+            encoder_padding_mask: Masks encoder padding [batch, 1, 1, src_len]
+            return_attn_weights: Whether to return attention weights
+            
+        Returns:
+            Processed tensor and optionally attention weights
+        """
+        # Step 1: Masked Self-Attention
         self_attn_output, self_attn_weights = self.masked_self_attn(
             x, x, x, target_mask, return_weights=return_attn_weights
         )
         x = self.norm1(x + self.dropout(self_attn_output))  # Add & Norm
-
-        # 2. Cross-Attention (Query is x, Key/Value are encoder_output)
-        # Passing the return_weights flag down
+        
+        # Step 2: Cross-Attention with encoder output
         cross_attn_output, cross_attn_weights = self.cross_attn(
-            x, encoder_output, encoder_output, encoder_padding_mask, return_weights=return_attn_weights
+            x, encoder_output, encoder_output, 
+            encoder_padding_mask, return_weights=return_attn_weights
         )
         x = self.norm2(x + self.dropout(cross_attn_output))  # Add & Norm
-
-        # 3. Feed Forward
+        
+        # Step 3: Feed-Forward network
         ff_output = self.feed_forward(x)
         x = self.norm3(x + self.dropout(ff_output))  # Add & Norm
-
-        # Returning weights only if requested
-        sa_w = self_attn_weights if return_attn_weights else None
-        ca_w = cross_attn_weights if return_attn_weights else None
-        return x, sa_w, ca_w
+        
+        # Only return attention weights if requested
+        if return_attn_weights:
+            return x, self_attn_weights, cross_attn_weights
+        else:
+            return x, None, None
 
 
 class Decoder(nn.Module):
     """
-    The Transformer Decoder stack.
-    Handles target embedding, positional encoding, and passes data through
-    multiple DecoderBlock layers.
+    Transformer Decoder.
+    
+    Processes target sequences by:
+    1. Embedding target tokens
+    2. Adding positional encoding
+    3. Processing through multiple decoder blocks
+    
+    The decoder can only attend to previous target tokens (causal masking)
+    and attends to the entire encoder output via cross-attention.
     """
-
     def __init__(
-        self,
-        target_vocab_size: int,
-        d_model: int,
-        n_layers: int,
-        num_heads: int,
-        d_ff: int,
-        dropout: float,
-        max_len_pe: int,
-        device: torch.device,
-    ):
+        self, 
+        target_embedding: nn.Embedding,
+        positional_encoding: PositionalEncoding,
+        blocks: nn.ModuleList,
+        device: torch.device
+    ) -> None:
         super().__init__()
         self.device = device
-        self.n_layers = n_layers
-        self.target_embedding = nn.Embedding(target_vocab_size, d_model, device=device)
-        self.positional_encoding = PositionalEncoding(
-            d_model, dropout, max_len_pe, device
-        )
+        self.n_layers = len(blocks)
+        
+        # Input processing layers
+        self.target_embedding = target_embedding
+        self.positional_encoding = positional_encoding
+        
+        # Stack of decoder blocks
+        self.blocks = blocks
+        
+        print(f"Decoder: Initialized with {self.n_layers} layers.")
 
-        self.layers = nn.ModuleList(
-            [
-                DecoderBlock(d_model, num_heads, d_ff, dropout, device)
-                for _ in range(n_layers)
-            ]
+    @classmethod
+    def from_config(cls, config: dict, n_layers: int = None) -> 'Decoder':
+        """
+        Create a Decoder instance from a configuration dictionary.
+        
+        Args:
+            config: Configuration dictionary with model parameters
+            n_layers: Override the number of layers (optional)
+            
+        Returns:
+            Decoder instance
+        """
+        n_layers = n_layers or config.get('n_decoder_layers', 6)
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        
+        # Create target embedding
+        target_embedding = nn.Embedding(
+            num_embeddings=config['target_vocab_size'],
+            embedding_dim=config['d_model'],
+            device=device
         )
-        print(f"Decoder: Initialized with {n_layers} layers.")
-
-    def _create_look_ahead_mask(self, size: int) -> torch.Tensor:
-        """Creates a look-ahead mask of shape (1, 1, size, size)."""
-        mask = torch.ones(size, size, device=self.device, dtype=torch.bool)
-        mask = torch.triu(mask, diagonal=1)  # Upper triangle (True where j > i)
-        return mask.unsqueeze(0).unsqueeze(0)  # Adding batch and head dims
+        
+        # Create positional encoding
+        positional_encoding = PositionalEncoding(
+            d_model=config['d_model'],
+            dropout=config['dropout'],
+            max_len=config['max_len_pe'],
+            device=device
+        )
+        
+        # Create decoder blocks
+        decoder_blocks = nn.ModuleList()
+        for _ in range(n_layers):
+            # Create masked self-attention
+            masked_self_attn = MultiHeadAttention(
+                num_heads=config['num_heads'],
+                d_model=config['d_model'],
+                dropout=config['dropout'],
+                device=device
+            )
+            
+            # Create cross-attention
+            cross_attn = MultiHeadAttention(
+                num_heads=config['num_heads'],
+                d_model=config['d_model'],
+                dropout=config['dropout'],
+                device=device
+            )
+            
+            # Create feed-forward network
+            feed_forward = FeedForward(
+                d_model=config['d_model'],
+                d_ff=config['d_ff'],
+                dropout=config['dropout'],
+                device=device
+            )
+            
+            # Create layer normalization layers
+            norm1 = LayerNorm(config['d_model'])
+            norm2 = LayerNorm(config['d_model'])
+            norm3 = LayerNorm(config['d_model'])
+            
+            # Create and add decoder block
+            decoder_block = DecoderBlock(
+                masked_self_attn=masked_self_attn,
+                cross_attn=cross_attn,
+                feed_forward=feed_forward,
+                norm1=norm1,
+                norm2=norm2,
+                norm3=norm3,
+                dropout=config['dropout']
+            )
+            decoder_blocks.append(decoder_block)
+        
+        return cls(
+            target_embedding=target_embedding,
+            positional_encoding=positional_encoding,
+            blocks=decoder_blocks,
+            device=device
+        )
 
     def forward(
         self,
@@ -900,41 +1015,94 @@ class Decoder(nn.Module):
         encoder_output: torch.Tensor,
         encoder_padding_mask: torch.Tensor,
         target_padding_mask: Optional[torch.Tensor] = None,
-        return_last_layer_attn_weights: bool = False,  # Flag to get weights from last layer
+        return_last_layer_attn_weights: bool = False
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        # Returning output, last_self_attn_weights, last_cross_attn_weights
+        """
+        Process target tokens through the decoder stack.
+        
+        Args:
+            target_token_ids: Target token IDs [batch, tgt_len]
+            encoder_output: Output from encoder [batch, src_len, d_model]
+            encoder_padding_mask: Masks encoder padding [batch, 1, 1, src_len]
+            target_padding_mask: Masks target padding [batch, 1, 1, tgt_len]
+            return_last_layer_attn_weights: Whether to return attention weights
 
-        batch_size, tgt_seq_len = target_token_ids.shape
-        x = self.target_embedding(target_token_ids) * math.sqrt(
-            self.target_embedding.embedding_dim
-        )
-        x = self.positional_encoding(x)
-
-        look_ahead_mask = self._create_look_ahead_mask(tgt_seq_len)
-        combined_target_mask = (
-            torch.logical_or(look_ahead_mask, target_padding_mask)
-            if target_padding_mask is not None
-            else look_ahead_mask
-        )
-
+        Returns:
+            Tuple containing:
+            - decoder_output: Output tensor [batch, tgt_len, d_model]
+            - self_attn_weights: Self-attention weights (if requested)
+            - cross_attn_weights: Cross-attention weights (if requested)
+        """
+        # 1. Process inputs
+        x = self._prepare_inputs(target_token_ids, target_padding_mask)
+        
+        # 2. Process through decoder blocks
         last_self_attn_weights = None
         last_cross_attn_weights = None
-        for i, layer in enumerate(self.layers):
-            request_weights = return_last_layer_attn_weights and (
-                i == self.n_layers - 1
-            )
-            x, sa_w, ca_w = layer(  # Getting all 3 return values
+        
+        for i, block in enumerate(self.blocks):
+            # Only collect attention weights from the last layer if requested
+            need_weights = return_last_layer_attn_weights and (i == self.n_layers - 1)
+            
+            # Process through a single decoder block
+            x, self_attn_weights, cross_attn_weights = block(
                 x=x,
                 encoder_output=encoder_output,
-                target_mask=combined_target_mask,
+                target_mask=self.combined_target_mask,
                 encoder_padding_mask=encoder_padding_mask,
-                return_attn_weights=request_weights,  # Passing flag to layer
+                return_attn_weights=need_weights
             )
-            if request_weights:
-                last_self_attn_weights = sa_w
-                last_cross_attn_weights = ca_w
+            
+            # Store weights if this is the last layer and weights were requested
+            if need_weights:
+                last_self_attn_weights = self_attn_weights
+                last_cross_attn_weights = cross_attn_weights
 
         return x, last_self_attn_weights, last_cross_attn_weights
+    
+    def _prepare_inputs(self, target_token_ids: torch.Tensor, target_padding_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Prepare embeddings and masks for decoder processing.
+        
+        Args:
+            target_token_ids: Target token IDs [batch, tgt_len]
+            target_padding_mask: Padding mask [batch, 1, 1, tgt_len]
+            
+        Returns:
+            Embedded tensor with positional encoding [batch, tgt_len, d_model]
+        """
+        # Embed and add positional encoding
+        batch_size, seq_len = target_token_ids.shape
+        embed_scaled = self.target_embedding(target_token_ids) * math.sqrt(
+            self.target_embedding.embedding_dim
+        )
+        x = self.positional_encoding(embed_scaled)
+        
+        # Create causal mask (to prevent attending to future tokens)
+        self.look_ahead_mask = self._create_look_ahead_mask(seq_len)
+        
+        # Combine padding and causal masks if needed
+        self.combined_target_mask = (
+            torch.logical_or(self.look_ahead_mask, target_padding_mask)
+            if target_padding_mask is not None
+            else self.look_ahead_mask
+        )
+        
+        return x
+        
+    def _create_look_ahead_mask(self, size: int) -> torch.Tensor:
+        """
+        Create a mask to prevent attending to future tokens.
+        
+        Args:
+            size: Sequence length
+            
+        Returns:
+            Boolean mask tensor [1, 1, size, size]
+        """
+        mask = torch.ones(size, size, device=self.device, dtype=torch.bool)
+        mask = torch.triu(mask, diagonal=1)  # Upper triangle (True where j > i)
+        return mask.unsqueeze(0).unsqueeze(0)  # Add batch and head dims
 
 
 class ProjectionLayer(nn.Module):
@@ -945,66 +1113,294 @@ class ProjectionLayer(nn.Module):
         self.proj = nn.Linear(d_model, vocab_size, device=device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (Batch, SeqLen, Dim) -> (Batch, SeqLen, VocabSize)
+        # (Batch, SeqLen, d_model) -> (Batch, SeqLen, vocab_size)
         # Applying log_softmax for NLLLoss or keeping as logits for CrossEntropyLoss
-        # return F.log_softmax(self.proj(x), dim=-1) # Example for NLLLoss
-        return self.proj(x)  # Returning raw logits for CrossEntropyLoss
+        return F.log_softmax(self.proj(x), dim=-1) # Example for NLLLoss
+        # return self.proj(x)  # Returning raw logits for CrossEntropyLoss
 
 
 class Transformer(nn.Module):
     """
-    A standard Encoder-Decoder Transformer model.
+    Complete Transformer model (Encoder-Decoder architecture).
+    
+    Processes:
+    1. Source text through the encoder
+    2. Target tokens through the decoder (using encoder output)
+    3. Projects decoder output to vocabulary logits
     """
-
-    def __init__(
-        self, encoder: nn.Module, decoder: nn.Module, projection_layer: nn.Module
-    ):
-        """
-        Initializes the full Transformer model.
-
-        Args:
-            encoder (nn.Module): An initialized Encoder instance.
-            decoder (nn.Module): An initialized Decoder instance.
-            projection_layer (nn.Module): An initialized ProjectionLayer instance.
-        """
+    def __init__(self, encoder: Encoder, decoder: Decoder, projection_layer: ProjectionLayer) -> None:
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.projection_layer = projection_layer
 
-    def forward(
-        self,
-        source_texts: List[str],
-        target_token_ids: torch.Tensor,
-        target_padding_id: int = 0,
-        return_last_dec_attn_weights: bool = False,  # Flag for decoder weights
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        # Returning logits, last_self_attn_weights, last_cross_attn_weights
-
-        # 1. Encoding
-        # *** ENSURING MY ENCODER RETURNS (output, mask) ***
-        encoder_output, encoder_padding_mask = self.encoder(source_texts)
-
-        # 2. Preparing target padding mask
-        target_padding_mask = (
-            (target_token_ids == target_padding_id)
-            .unsqueeze(1)
-            .unsqueeze(2)
-            .to(target_token_ids.device)
+    @classmethod
+    def from_config(cls, config: dict) -> 'Transformer':
+        """
+        Create a Transformer instance from a configuration dictionary.
+        
+        Args:
+            config: Configuration dictionary with model parameters
+            
+        Returns:
+            Transformer instance
+        """
+        # Create encoder, decoder, and projection layer
+        encoder = Encoder.from_config(config)
+        decoder = Decoder.from_config(config)
+        projection_layer = ProjectionLayer(
+            d_model=config['d_model'],
+            vocab_size=config['target_vocab_size'],
+            device=config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        )
+        
+        # Create and return transformer
+        return cls(
+            encoder=encoder,
+            decoder=decoder,
+            projection_layer=projection_layer
         )
 
-        # 3. Decoding
-        decoder_output, last_self_attn_weights, last_cross_attn_weights = self.decoder(
+    def forward(
+        self, 
+        source_texts: List[str], 
+        target_token_ids: torch.Tensor, 
+        target_padding_id: int = 0, 
+        return_last_dec_attn_weights: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Forward pass through the Transformer.
+        
+        Args:
+            source_texts: List of source text strings
+            target_token_ids: Target token IDs [batch, tgt_len]
+            target_padding_id: ID used for padding in target
+            return_last_dec_attn_weights: Whether to return attention weights
+            
+        Returns:
+            logits: Output logits [batch, tgt_len, vocab_size]
+            self_attn_weights: Self-attention weights (if requested)
+            cross_attn_weights: Cross-attention weights (if requested)
+        """
+        # 1. Encode source texts
+        encoder_output, encoder_padding_mask = self.encoder(source_texts)
+        
+        # 2. Create target padding mask
+        target_padding_mask = self._create_target_padding_mask(
+            target_token_ids, target_padding_id
+        )
+        
+        # 3. Decode with target tokens and encoder output
+        decoder_output, self_attn_weights, cross_attn_weights = self.decoder(
             target_token_ids=target_token_ids,
             encoder_output=encoder_output,
             encoder_padding_mask=encoder_padding_mask,
             target_padding_mask=target_padding_mask,
-            # Passing the flag down to the decoder
-            return_last_layer_attn_weights=return_last_dec_attn_weights,
+            return_last_layer_attn_weights=return_last_dec_attn_weights
         )
-
-        # 4. Projecting to Logits
+        
+        # 4. Project to vocabulary logits
         logits = self.projection_layer(decoder_output)
+        
+        return logits, self_attn_weights, cross_attn_weights
+    
+    def _create_target_padding_mask(self, target_token_ids: torch.Tensor, padding_id: int) -> torch.Tensor:
+        """
+        Create mask to prevent attending to padding tokens in the target.
+        
+        Args:
+            target_token_ids: Target token IDs [batch, tgt_len]
+            padding_id: ID used for padding
+            
+        Returns:
+            Boolean mask tensor [batch, 1, 1, tgt_len]
+        """
+        return (target_token_ids == padding_id).unsqueeze(1).unsqueeze(2).to(target_token_ids.device)
+    
+    @torch.no_grad()
+    def generate(
+        self, 
+        source_texts: List[str], 
+        max_len: int = 50, 
+        start_symbol_id: int = 101
+    ) -> torch.Tensor:
+        """
+        Generate output sequences from source texts (simple greedy search).
+        
+        Args:
+            source_texts: List of source text strings to translate/process
+            max_len: Maximum sequence length to generate
+            start_symbol_id: ID of the starting token (usually [CLS] or similar)
+            
+        Returns:
+            Generated sequences [batch, seq_len]
+        """
+        batch_size = len(source_texts)
+        device = next(self.parameters()).device
+        
+        # Encode the source texts
+        encoder_output, encoder_padding_mask = self.encoder(source_texts)
+        
+        # Initialize with start symbol
+        target_ids = torch.ones(batch_size, 1, dtype=torch.long, device=device) * start_symbol_id
+        
+        # Generate tokens one by one
+        for i in range(max_len - 1):
+            # Create padding mask for the current target sequence
+            target_padding_mask = self._create_target_padding_mask(target_ids, 0)
+            
+            # Get decoder output for current sequence
+            decoder_output, _, _ = self.decoder(
+                target_token_ids=target_ids,
+                encoder_output=encoder_output,
+                encoder_padding_mask=encoder_padding_mask,
+                target_padding_mask=target_padding_mask
+            )
+            
+            # Get next token prediction (from last position)
+            logits = self.projection_layer(decoder_output)
+            next_token_logits = logits[:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            
+            # Append to target sequence
+            target_ids = torch.cat([target_ids, next_token], dim=1)
+        
+        return target_ids
 
-        # Returning logits and optionally the weights from the last decoder layer
-        return logits, last_self_attn_weights, last_cross_attn_weights
+
+def create_transformer(config: dict) -> Transformer:
+    """
+    Create a complete transformer model from a configuration dictionary.
+    
+    This function handles the creation of all components and assembles them
+    into a complete transformer model.
+    
+    Args:
+        config: Configuration dictionary with model parameters
+        
+    Required config keys:
+        - d_model: Model dimension
+        - num_heads: Number of attention heads
+        - dropout: Dropout rate
+        - d_ff: Feed-forward dimension
+        - target_vocab_size: Target vocabulary size
+        - tokenizer_name: Name of tokenizer to use
+        - max_len_pe: Maximum sequence length for positional encoding
+        
+    Optional config keys:
+        - n_encoder_layers: Number of encoder layers (default 6)
+        - n_decoder_layers: Number of decoder layers (default 6)
+        - device: Device to place model on
+        - max_length: Maximum sequence length for input embedding
+        
+    Returns:
+        Assembled Transformer model
+    """
+    # Prepare and validate configuration
+    config = _prepare_config(config)
+    
+    # Create transformer using factory method
+    transformer = Transformer.from_config(config)
+    
+    # Ensure model is on the correct device
+    return transformer.to(config['device'])
+
+
+def _prepare_config(config: dict) -> dict:
+    """Validates and prepares configuration with defaults."""
+    # Required configuration parameters
+    required_keys = [
+        'd_model', 'num_heads', 'dropout', 'd_ff', 
+        'target_vocab_size', 'tokenizer_name', 'max_len_pe'
+    ]
+    
+    # Validate required parameters
+    for key in required_keys:
+        if key not in config:
+            raise ValueError(f"Missing required configuration parameter: {key}")
+    
+    # Make a copy to avoid modifying the original
+    config = config.copy()
+    
+    # Set up device
+    device_value = config.get('device')
+    if device_value is None:
+        # Default device if none provided
+        config['device'] = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    elif isinstance(device_value, str):
+        # Convert string to torch.device
+        config['device'] = torch.device(device_value)
+    else:
+        # Already a torch.device
+        config['device'] = device_value
+    
+    # Set defaults for optional parameters
+    config.setdefault('n_encoder_layers', 6)
+    config.setdefault('n_decoder_layers', 6)
+    
+    print(f"Creating transformer on device: {config['device']}")
+    return config
+
+
+def create_default_transformer_config(
+    d_model: int = 512,
+    num_heads: int = 8, 
+    dropout: float = 0.1,
+    d_ff: int = 2048,
+    target_vocab_size: int = 32000,
+    tokenizer_name: str = "bert-base-uncased",
+    max_len_pe: int = 512,
+    n_encoder_layers: int = 6,
+    n_decoder_layers: int = 6,
+    device: Optional[Union[str, torch.device]] = None
+) -> dict:
+    """
+    Create a default configuration for a transformer model.
+    
+    Args:
+        d_model: Model dimension
+        num_heads: Number of attention heads
+        dropout: Dropout rate
+        d_ff: Feed-forward dimension (usually 4x d_model)
+        target_vocab_size: Target vocabulary size
+        tokenizer_name: Name of tokenizer to use
+        max_len_pe: Maximum sequence length for positional encoding
+        n_encoder_layers: Number of encoder layers
+        n_decoder_layers: Number of decoder layers
+        device: Device to place model on
+        
+    Returns:
+        Configuration dictionary
+    """
+    return {
+        "d_model": d_model,
+        "num_heads": num_heads,
+        "dropout": dropout,
+        "d_ff": d_ff,
+        "target_vocab_size": target_vocab_size,
+        "tokenizer_name": tokenizer_name,
+        "max_len_pe": max_len_pe,
+        "n_encoder_layers": n_encoder_layers,
+        "n_decoder_layers": n_decoder_layers,
+        "device": device
+    }
+
+
+if __name__ == "__main__":
+    # Create a transformer with default configuration
+    config = create_default_transformer_config()
+    transformer = create_transformer(config)
+
+    # Test with some example data
+    input_texts = ["Hello, world!", "This is a test."]
+    target_token_ids = torch.randint(0, 32000, (len(input_texts), 10))
+    
+    # Run forward pass
+    logits, self_attn_weights, cross_attn_weights = transformer(
+        input_texts, target_token_ids, return_last_dec_attn_weights=True
+    )
+    
+    # Print output shapes
+    print(f"Output logits shape: {logits.shape}")
+    print(f"Self-attention weights shape: {self_attn_weights.shape if self_attn_weights is not None else None}")
+    print(f"Cross-attention weights shape: {cross_attn_weights.shape if cross_attn_weights is not None else None}")

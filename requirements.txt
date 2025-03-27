@@ -1,8 +1,12 @@
 ipykernel
-torch
-numpy
-matplotlib
+torch>=1.9.0
+numpy>=1.19.5
+matplotlib>=3.4.3
 tiktoken
 tokenizers
 black==24.4.2
-transformers
+transformers>=4.11.3
+datasets>=1.11.0
+tqdm>=4.62.3
+seaborn>=0.11.2
+scikit-learn>=1.0.0
