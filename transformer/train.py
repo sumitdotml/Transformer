@@ -240,6 +240,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='Initialize but don\'t train (for testing).')
     parser.add_argument('--test-dataset', action='store_true', help='Only test dataset loading without training.')
     parser.add_argument('--limit', type=int, help='Limit the number of examples to use (for faster testing).')
+    parser.add_argument('--epochs', type=int, help='Override the number of epochs to train for.')
     args = parser.parse_args()
     
     # Getting the device
@@ -259,6 +260,11 @@ def main():
             config[key] = value
     else:
         print(f"No specific configuration found for {args.lang_pair}, using defaults")
+    
+    # Overriding number of epochs if specified via command line
+    if args.epochs is not None:
+        config["num_epochs"] = args.epochs
+        print(f"Overriding number of epochs to {args.epochs}")
     
     # Storing the language pair in the config
     config["lang_pair"] = args.lang_pair

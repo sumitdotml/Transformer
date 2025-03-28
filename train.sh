@@ -7,6 +7,8 @@ cd "$(dirname "$0")"
 RESUME_CHECKPOINT=""
 LANG_PAIR="en-ja"
 DRY_RUN=""
+EPOCHS=""
+LIMIT=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -17,6 +19,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --lang-pair)
       LANG_PAIR="$2"
+      shift # past argument
+      shift # past value
+      ;;
+    --epochs)
+      EPOCHS="--epochs $2"
+      shift # past argument
+      shift # past value
+      ;;
+    --limit)
+      LIMIT="--limit $2"
       shift # past argument
       shift # past value
       ;;
@@ -75,10 +87,10 @@ fi
 
 if [ -n "$RESUME_CHECKPOINT" ]; then
     echo "Resuming from checkpoint: $RESUME_CHECKPOINT"
-    python transformer/train.py --resume "$RESUME_CHECKPOINT" --lang-pair "$LANG_PAIR" $DRY_RUN
+    python transformer/train.py --resume "$RESUME_CHECKPOINT" --lang-pair "$LANG_PAIR" $EPOCHS $LIMIT $DRY_RUN
 else
     echo "Starting new training run"
-    python transformer/train.py --lang-pair "$LANG_PAIR" $DRY_RUN
+    python transformer/train.py --lang-pair "$LANG_PAIR" $EPOCHS $LIMIT $DRY_RUN
 fi
 
 echo "Training complete!"

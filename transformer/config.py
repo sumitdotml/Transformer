@@ -38,7 +38,7 @@ def get_config():
         # Language-specific configurations
         "language_pairs": {
             "en-ja": {
-                "num_epochs": 20,
+                "num_epochs": 50,
                 "batch_size": 16,
                 "learning_rate": 1e-4,
                 "dropout": 0.2,
