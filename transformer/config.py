@@ -21,7 +21,7 @@ def get_config():
         
         # Training
         "batch_size": 8,
-        "num_epochs": 20,
+        "num_epochs": 50,
         "learning_rate": 1e-4,
         "patience": 5,         # Early stopping patience
         "clip_grad": 1.0,      # Gradient clipping value

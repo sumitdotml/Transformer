@@ -31,6 +31,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo "uv is not installed. Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    
+    # Add uv to PATH for the current session if not already there
+    if ! command -v uv &> /dev/null; then
+        echo "Adding uv to PATH..."
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+    
+    # Verify uv is now available
+    if ! command -v uv &> /dev/null; then
+        echo "Failed to install uv. Please install it manually:"
+        echo "curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    
+    echo "uv installed successfully."
+fi
+
 # Create virtual environment if it doesn't exist
 if [ ! -d ".venv" ]; then
     echo "Creating virtual environment..."
@@ -41,9 +62,9 @@ fi
 source .venv/bin/activate
 
 # Install dependencies if needed
-if ! pip show datasets > /dev/null; then
-    echo "Installing dependencies..."
-    pip install torch transformers datasets matplotlib tqdm numpy seaborn
+if ! uv pip show datasets &> /dev/null; then
+    echo "Installing dependencies with uv..."
+    uv pip install -r requirements.txt
 fi
 
 # Run the training script
