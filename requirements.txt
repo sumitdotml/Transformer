@@ -10,3 +10,7 @@ datasets>=1.11.0
 tqdm>=4.62.3
 seaborn>=0.11.2
 scikit-learn>=1.0.0
+protobuf
+fugashi
+ipadic
+unidic-lite

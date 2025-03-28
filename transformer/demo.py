@@ -5,14 +5,14 @@ from datasets import load_dataset
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
+import datetime
 
-# Import our simplified transformer
-from config import get_config
-from simplified_model import build_transformer_from_config
+# Import configuration and model building functions
+from config import get_config, get_weights_file_path, get_device_config
+from simplified_model import build_transformer
 
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# Set device using the centralized function
+device = get_device_config()
 
 class TranslationDataset(Dataset):
     """Custom dataset for machine translation"""
@@ -32,9 +32,8 @@ class TranslationDataset(Dataset):
         src_text = self.dataset[idx]["translation"][self.src_lang]
         tgt_text = self.dataset[idx]["translation"][self.tgt_lang]
         
-        # Tokenize source text (the forward method will handle this)
         
-        # Tokenize target text (need token ids here for input to decoder)
+        # Tokenizing target text (need token ids here for input to decoder)
         tgt_tokens = self.tokenizer(
             tgt_text,
             padding="max_length",
@@ -55,11 +54,11 @@ def train_epoch(model, data_loader, optimizer, criterion, device):
     total_loss = 0
     
     for batch in tqdm(data_loader, desc="Training"):
-        # Get source and target
+        # Getting source and target
         src_texts = batch["src_text"]
         tgt_tokens = batch["tgt_tokens"].to(device)
         
-        # Shift targets for teacher forcing 
+        # Shifting targets for teacher forcing 
         # (model should predict next token given previous tokens)
         input_tgt = tgt_tokens[:, :-1]
         output_tgt = tgt_tokens[:, 1:]
@@ -67,13 +66,13 @@ def train_epoch(model, data_loader, optimizer, criterion, device):
         # Forward pass
         output = model(src_texts, input_tgt)
         
-        # Reshape output and target for loss calculation
+        # Reshaping output and target for loss calculation
         # output: [batch, seq_len, vocab_size] -> [batch*seq_len, vocab_size]
         # target: [batch, seq_len] -> [batch*seq_len]
         output = output.reshape(-1, output.size(-1))
         output_tgt = output_tgt.reshape(-1)
         
-        # Calculate loss
+        # Calculating loss
         loss = criterion(output, output_tgt)
         
         # Backpropagation
@@ -92,22 +91,22 @@ def evaluate(model, data_loader, criterion, device):
     
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Evaluating"):
-            # Get source and target
+            # Getting source and target
             src_texts = batch["src_text"]
             tgt_tokens = batch["tgt_tokens"].to(device)
             
-            # Shift targets for teacher forcing
+            # Shifting targets for teacher forcing
             input_tgt = tgt_tokens[:, :-1]
             output_tgt = tgt_tokens[:, 1:]
             
             # Forward pass
             output = model(src_texts, input_tgt)
             
-            # Reshape output and target for loss calculation
+            # Reshaping output and target for loss calculation
             output = output.reshape(-1, output.size(-1))
             output_tgt = output_tgt.reshape(-1)
             
-            # Calculate loss
+            # Calculating loss
             loss = criterion(output, output_tgt)
             total_loss += loss.item()
             
@@ -117,38 +116,84 @@ def translate_example(model, tokenizer, text, tgt_lang, src_lang="en", max_len=5
     """Translate a single text example"""
     model.eval()
     
-    # Generate with the model
+    # Generating with the model
     with torch.no_grad():
         generated_ids = model.generate([text], max_len=max_len)
     
-    # Decode generated token IDs to text
+    # Decoding generated token IDs to text
     generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
     
     print(f"{src_lang}: {text}")
     print(f"{tgt_lang}: {generated_text[0]}")
     return generated_text[0]
 
+def get_timestamp():
+    """Get current timestamp string for file naming"""
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
 def main():
-    # Load configuration
+    # Loading configuration
     config = get_config()
     
-    # Load dataset (small subset of WMT14)
+    # Set language pair for Japanese translation (to use Japanese-specific tokenizer)
+    lang_pair = "en-ja"
+    config["lang_pair"] = lang_pair
+    
+    # Apply language-specific configurations if available
+    if lang_pair in config["language_pairs"]:
+        lang_config = config["language_pairs"][lang_pair]
+        print(f"Using language-specific configuration for {lang_pair}")
+        
+        # Update config with language-specific values
+        for key, value in lang_config.items():
+            config[key] = value
+    
+    # Loading dataset (real Japanese dataset)
     print("Loading dataset...")
-    dataset = load_dataset("wmt14", "de-en", split="validation[:100]")
+    try:
+        # First try the opus-100 dataset that has actual English-Japanese pairs
+        dataset = load_dataset("Helsinki-NLP/opus-100", "en-ja", split="validation[:100]")
+        print(f"Loaded {len(dataset)} en-ja translation examples from opus-100")
+    except Exception as e:
+        print(f"Error loading opus-100 dataset: {e}")
+        try:
+            # Try opus_books as a first fallback
+            dataset = load_dataset("Helsinki-NLP/opus_books", "en-ja", split="train[:100]")
+            print(f"Loaded {len(dataset)} en-ja translation examples from opus_books")
+        except Exception as e2:
+            print(f"Error loading opus_books dataset: {e2}")
+            try:
+                # Try JParaCrawl as a second fallback
+                dataset = load_dataset("yuriseki/JParaCrawl", split="train[:100]")
+                print(f"Loaded {len(dataset)} examples from JParaCrawl")
+            except Exception as e3:
+                print(f"Error loading JParaCrawl dataset: {e3}")
+                # Last resort, use wmt14 and map from German, but print a warning
+                print("WARNING: Could not load any Japanese datasets, falling back to WMT14 with German mapped to Japanese")
+                dataset = load_dataset("wmt14", "de-en", split="validation[:100]")
+                
+                # Map the German entries to Japanese for demonstration purposes
+                print("Mapping dataset to support en-ja pair (demo only)...")
+                dataset = dataset.map(lambda example: {
+                    "translation": {
+                        "en": example["translation"]["en"],
+                        "ja": example["translation"]["de"]  # Using German as a stand-in for Japanese
+                    }
+                })
     
     # Build model
     print("Building model...")
-    model = build_transformer_from_config(config).to(device)
+    model = build_transformer(config).to(device)
     
-    # Get tokenizer from the model
+    # Getting tokenizer from the model
     tokenizer = model.encoder.tokenizer
     
-    # Create datasets
+    # Creating datasets
     train_dataset = TranslationDataset(
         dataset.select(range(80)),  # First 80 examples for training
         tokenizer, 
         src_lang="en", 
-        tgt_lang="de",
+        tgt_lang="ja",
         max_length=config["max_seq_len"]
     )
     
@@ -156,11 +201,11 @@ def main():
         dataset.select(range(80, 100)),  # Last 20 examples for validation
         tokenizer, 
         src_lang="en", 
-        tgt_lang="de",
+        tgt_lang="ja",
         max_length=config["max_seq_len"]
     )
     
-    # Create data loaders
+    # Creating data loaders
     train_loader = DataLoader(
         train_dataset, 
         batch_size=config["batch_size"], 
@@ -173,15 +218,15 @@ def main():
         shuffle=False
     )
     
-    # Define optimizer and loss function
+    # Defining optimizer and loss function
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     criterion = nn.NLLLoss(ignore_index=tokenizer.pad_token_id)
     
     # Training loop
-    num_epochs = 5  # For demo, use fewer epochs
+    num_epochs = 2  # using fewer epochs for demo
     train_losses = []
     val_losses = []
-    
+     
     print(f"Starting training for {num_epochs} epochs...")
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
@@ -196,12 +241,12 @@ def main():
         
         print(f"Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}")
         
-        # Translate example
+        # Translating example
         if epoch % 1 == 0:
             example = dataset[0]["translation"]["en"]
-            translate_example(model,    tokenizer, example, "de")
+            translate_example(model, tokenizer, example, "ja")
             
-    # Plot training history
+    # Plotting training history
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Validation Loss")
@@ -210,23 +255,27 @@ def main():
     plt.title("Training History")
     plt.legend()
 
-    demo_dir = "transformer/demo"
+    # Creating demo directory if it doesn't exist
+    demo_dir = config["demo_dir"]
     if not os.path.exists(demo_dir):
         os.makedirs(demo_dir)
-    plt.savefig(os.path.join(demo_dir, "training_history.png") if not os.path.exists(os.path.join(demo_dir, "training_history.png")) else None)
-    print(f"Training history saved to {os.path.join(demo_dir, 'training_history.png')}")
     
-    # Save trained model
-    model_path = os.path.join(demo_dir, "transformer_model.pth")
-    if not os.path.exists(model_path):
-        torch.save(model.state_dict(), model_path)
+    # Using timestamp for unique filename
+    timestamp = get_timestamp()
+    plot_path = os.path.join(demo_dir, f"training_history_{timestamp}.png")
+    plt.savefig(plot_path)
+    print(f"Training history saved to {plot_path}")
+    
+    # Saving trained model with timestamp (only to demo directory)
+    model_path = os.path.join(demo_dir, f"transformer_model_{timestamp}.pth")
+    torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
     
-    # Demonstrate translation with the trained model
+    # Demonstrating translation with the trained model
     print("\nTranslation examples:")
     for i in range(5):
         example = dataset[i]["translation"]["en"]
-        translate_example(model, tokenizer, example, "de")
+        translate_example(model, tokenizer, example, "ja")
 
 if __name__ == "__main__":
     main() 

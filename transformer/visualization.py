@@ -5,6 +5,8 @@ import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 from transformers import AutoTokenizer
 import seaborn as sns
+from config import get_config, get_device_config
+from simplified_model import build_transformer
 
 def visualize_attention(attention_weights, tokens, layer=0, head=0, cmap='viridis', title=None):
     """
@@ -261,14 +263,18 @@ def plot_attention_patterns(model, text, save_path=None):
     
     return fig
 
-if __name__ == "__main__":
-    # Example usage
-    from config import get_config
-    from simplified_model import build_transformer_from_config
+def main():
+    """
+    Main function to demonstrate visualization capabilities.
+    """
+    # Get device using the centralized function
+    device = get_device_config()
     
-    # Create model
+    # Load configuration
     config = get_config()
-    model = build_transformer_from_config(config)
+    
+    # Build model
+    model = build_transformer(config).to(device)
     
     # Example text
     text = "Transformers are neural network models that process sequential data."
@@ -284,4 +290,7 @@ if __name__ == "__main__":
     fig_pos = visualize_positional_encoding(model)
     fig_pos.savefig(os.path.join(visualization_dir, "positional_encoding.png") if not os.path.exists(os.path.join(visualization_dir, "positional_encoding.png")) else None)
     
-    print("Visualizations generated successfully!") 
+    print("Visualizations generated successfully!")
+
+if __name__ == "__main__":
+    main() 

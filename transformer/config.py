@@ -1,4 +1,8 @@
 from pathlib import Path
+import os
+
+# Get the project root directory
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 def get_config():
     """
@@ -23,11 +27,12 @@ def get_config():
         "clip_grad": 1.0,      # Gradient clipping value
         "num_workers": 2,      # Data loader workers
         
-        # Model saving
-        "model_folder": "transformer/weights",
+        # Paths - using absolute paths for clarity
+        "root_dir": str(PROJECT_ROOT),
+        "model_folder": str(PROJECT_ROOT / "outputs" / "weights"),
         "model_basename": "transformer_",
         "preload": "latest",
-        "demo_dir": "transformer/demo",
+        "demo_dir": str(PROJECT_ROOT / "outputs" / "demo"),
         "demo_basename": "transformer_demo_",
         
         # Language-specific configurations
@@ -53,7 +58,7 @@ def get_weights_file_path(config, epoch: str):
     """Get the path to a specific weights file by epoch"""
     model_folder = config['model_folder']
     model_filename = f"{config['model_basename']}{epoch}.pt"
-    return str(Path('.') / model_folder / model_filename)
+    return os.path.join(model_folder, model_filename)
 
 def latest_weights_file_path(config):
     """Find the latest weights file in the weights folder"""

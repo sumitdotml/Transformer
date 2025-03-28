@@ -14,7 +14,6 @@ import argparse
 from config import get_config, get_weights_file_path, latest_weights_file_path, get_device_config
 from simplified_model import build_transformer
 
-# Set device using the centralized function
 device = get_device_config()
 
 class TranslationDataset(Dataset):
@@ -176,9 +175,10 @@ def save_training_state(config, model, optimizer, train_losses, val_losses, epoc
     
     # Also saving to the standard path from config.py (for compatibility)
     standard_model_path = get_weights_file_path(config, f"{epoch}")
-    standard_model_dir = os.path.dirname(standard_model_path)
-    if not os.path.exists(standard_model_dir):
-        os.makedirs(standard_model_dir)
+    
+    # Create standard weights directory if it doesn't exist
+    model_folder = config["model_folder"]
+    os.makedirs(model_folder, exist_ok=True)
     
     # Saving model to both locations
     torch.save(model.state_dict(), model_path)
@@ -238,6 +238,8 @@ def main():
     parser.add_argument('--resume', type=str, help='Path to a checkpoint file to resume training from.')
     parser.add_argument('--lang-pair', type=str, default='en-ja', help='Language pair to train (e.g., en-ja, en-de).')
     parser.add_argument('--dry-run', action='store_true', help='Initialize but don\'t train (for testing).')
+    parser.add_argument('--test-dataset', action='store_true', help='Only test dataset loading without training.')
+    parser.add_argument('--limit', type=int, help='Limit the number of examples to use (for faster testing).')
     args = parser.parse_args()
     
     # Getting the device
@@ -247,18 +249,18 @@ def main():
     # Getting configuration
     config = get_config()
     
-    # Update with language-specific configuration if available
+    # Updating config with language-specific configuration if available
     if args.lang_pair in config["language_pairs"]:
         lang_config = config["language_pairs"][args.lang_pair]
         print(f"Using language-specific configuration for {args.lang_pair}")
         
-        # Update config with language-specific values
+        # Updating config with language-specific values
         for key, value in lang_config.items():
             config[key] = value
     else:
         print(f"No specific configuration found for {args.lang_pair}, using defaults")
     
-    # Store the language pair in the config
+    # Storing the language pair in the config
     config["lang_pair"] = args.lang_pair
     
     # If dry run, exit after initialization
@@ -273,41 +275,80 @@ def main():
     
     # Creating output directories
     timestamp = get_timestamp()
-    output_dir = f"transformer/training_output/{timestamp}_{args.lang_pair}"
-    weights_dir = f"{output_dir}/weights"
-    plots_dir = f"{output_dir}/plots"
-    logs_dir = f"{output_dir}/logs"
     
-    for directory in [output_dir, weights_dir, plots_dir, logs_dir]:
+    # Using outputs folder for all outputs
+    root_dir = config["root_dir"]
+    outputs_dir = os.path.join(root_dir, "outputs")
+    training_output_dir = os.path.join(outputs_dir, "training")
+    
+    # Creating timestamped run directory
+    output_dir = os.path.join(training_output_dir, f"{timestamp}_{args.lang_pair}")
+    weights_dir = os.path.join(output_dir, "weights")
+    plots_dir = os.path.join(output_dir, "plots")
+    logs_dir = os.path.join(output_dir, "logs")
+    
+    for directory in [outputs_dir, training_output_dir, output_dir, weights_dir, plots_dir, logs_dir]:
         os.makedirs(directory, exist_ok=True)
+    
+    # Creating a copy of the config for saving to file
+    # Stripping absolute paths to avoid leaking system details
+    config_for_saving = config.copy()
+    for key in config_for_saving:
+        if isinstance(config_for_saving[key], str) and os.path.isabs(config_for_saving[key]):
+            # Replacing absolute paths with relative ones
+            config_for_saving[key] = os.path.basename(config_for_saving[key])
+        elif isinstance(config_for_saving[key], dict):
+            # Handling nested dictionaries like language_pairs
+            for sub_key, sub_value in config_for_saving[key].items():
+                if isinstance(sub_value, dict):
+                    for k, v in sub_value.items():
+                        if isinstance(v, str) and os.path.isabs(v):
+                            config_for_saving[key][sub_key][k] = os.path.basename(v)
     
     # Saving config to output directory
     with open(os.path.join(output_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=2)
+        json.dump(config_for_saving, f, indent=2)
     
     # Loading dataset
     print("Loading dataset...")
     try:
-        dataset = load_dataset("Helsinki-NLP/opus_books", "en-ja", split="train")
-        print(f"Loaded {len(dataset)} translation examples")
+        # First trying the opus-100 dataset that has actual English-Japanese pairs
+        split = "train[:{}]".format(args.limit) if args.limit else "train"
+        dataset = load_dataset("Helsinki-NLP/opus-100", "en-ja", split=split)
+        print(f"Loaded {len(dataset)} en-ja translation examples from opus-100")
     except Exception as e:
-        print(f"Error loading Helsinki-NLP/opus_books: {e}")
+        print(f"Error loading opus-100 dataset: {e}")
         try:
-            # Fallback to another dataset
-            dataset = load_dataset("yuriseki/JParaCrawl", split="train[:100000]")
-            print(f"Loaded {len(dataset)} translation examples from fallback dataset")
-        except Exception as e2:
-            print(f"Error loading fallback dataset: {e2}")
-            # Trying one more dataset
-            dataset = load_dataset("wmt19", "ja-en", split="train[:20000]")
-            # Swapping source and target to get en-ja
-            dataset = dataset.map(lambda x: {
-                "translation": {
-                    "en": x["translation"]["ja"],
-                    "ja": x["translation"]["en"]
-                }
-            })
-            print(f"Loaded {len(dataset)} translation examples from wmt19")
+            # Then trying opus_books
+            split = "train[:{}]".format(args.limit) if args.limit else "train"
+            dataset = load_dataset("Helsinki-NLP/opus_books", "en-ja", split=split)
+            print(f"Loaded {len(dataset)} translation examples from opus_books")
+        except Exception as e1:
+            print(f"Error loading Helsinki-NLP/opus_books: {e1}")
+            try:
+                # Fallback to JParaCrawl dataset
+                limit = args.limit if args.limit else 100000
+                split = f"train[:{limit}]"
+                dataset = load_dataset("yuriseki/JParaCrawl", split=split)
+                print(f"Loaded {len(dataset)} translation examples from JParaCrawl")
+            except Exception as e2:
+                print(f"Error loading JParaCrawl dataset: {e2}")
+                try:
+                    # Trying WMT19 dataset
+                    limit = args.limit if args.limit else 20000
+                    split = f"train[:{limit}]"
+                    dataset = load_dataset("wmt19", "ja-en", split=split)
+                    # Swapping source and target to get en-ja
+                    dataset = dataset.map(lambda x: {
+                        "translation": {
+                            "en": x["translation"]["ja"],
+                            "ja": x["translation"]["en"]
+                        }
+                    })
+                    print(f"Loaded {len(dataset)} translation examples from wmt19")
+                except Exception as e3:
+                    print(f"Failed to load any Japanese datasets: {e3}")
+                    raise RuntimeError("Could not load any suitable dataset for training. Please check your internet connection and dataset availability.")
     
     # Splitting dataset into train and validation
     train_size = int(0.9 * len(dataset))
@@ -318,6 +359,13 @@ def main():
     
     print(f"Training set: {len(train_dataset)} examples")
     print(f"Validation set: {len(val_dataset)} examples")
+    
+    # Exiting early if only testing dataset loading
+    if args.test_dataset:
+        print("Dataset loading test successful!")
+        print(f"Example English: {train_dataset[0]['translation']['en']}")
+        print(f"Example Japanese: {train_dataset[0]['translation']['ja']}")
+        return
     
     # Building model
     print("Building model...")
@@ -535,15 +583,18 @@ def main():
     
     # Saving final model using both approaches
     final_model_path = os.path.join(weights_dir, f"final_model_{timestamp}.pth")
+    
+    # Creating model folder from config if it doesn't exist
+    model_folder = config["model_folder"]
+    os.makedirs(model_folder, exist_ok=True)
+    
     final_standard_path = get_weights_file_path(config, "final")
-    final_standard_dir = os.path.dirname(final_standard_path)
-    if not os.path.exists(final_standard_dir):
-        os.makedirs(final_standard_dir)
     
     torch.save(model.state_dict(), final_model_path)
     torch.save(model.state_dict(), final_standard_path)
     print(f"Final model saved to {final_model_path}")
     print(f"Final model also saved to standard path: {final_standard_path}")
+    print(f"Final training plot saved to {final_plot_path}")
     
     print(f"Training completed! All outputs saved to {output_dir}")
 
