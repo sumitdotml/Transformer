@@ -1,10 +1,19 @@
+"""
+This file is a more robust implementation of the transformer model.
+A slightly shorter version (while ensuring the same functionality) can be found in `simplified_model.py`.
+"""
+
 import math
 from typing import Optional, List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Import device configuration function
+from config import get_device_config
+
+# Set device using the centralized function
+device = get_device_config()
 from transformers import (
     AutoTokenizer,
     PreTrainedTokenizerFast,
@@ -52,13 +61,22 @@ class InputEmbedding(nn.Module):
             f"InputEmbedding: Vocab Size = {self.vocab_size}, Padding ID = {self.padding_token_id}"
         )
 
-        # Initialize the embedding layer
-        self.embedding = nn.Embedding(
-            num_embeddings=self.vocab_size,
-            embedding_dim=d_model,
-            padding_idx=self.padding_token_id,  # Inform nn.Embedding about the padding index
-            device=device,
-        )
+        # Initialize the embedding layer - ensure it's on the right device
+        try:
+            self.embedding = nn.Embedding(
+                num_embeddings=self.vocab_size,
+                embedding_dim=d_model,
+                padding_idx=self.padding_token_id,
+                device=device,
+            )
+        except RuntimeError as e:
+            print(f"Warning: Could not create embedding directly on {device}: {e}")
+            print("Creating embedding on CPU and moving to target device")
+            self.embedding = nn.Embedding(
+                num_embeddings=self.vocab_size,
+                embedding_dim=d_model,
+                padding_idx=self.padding_token_id,
+            ).to(device)
 
     def forward(self, input_texts: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -100,7 +118,11 @@ class InputEmbedding(nn.Module):
             "return_tensors": "pt",  # Return PyTorch tensors
             "return_attention_mask": True,  # Get the attention mask
         }
-        encoding = self.tokenizer(**tokenizer_args).to(self.device)
+        
+        # Get encoding and ensure it's on the right device
+        encoding = self.tokenizer(**tokenizer_args)
+        if encoding["input_ids"].device != self.device:
+            encoding = {k: v.to(self.device) for k, v in encoding.items()}
 
         input_ids_tensor = encoding["input_ids"]  # Shape: (batch_size, seq_len)
         attention_mask_tensor = encoding[
@@ -191,21 +213,34 @@ class PositionalEncoding(nn.Module):
         self.max_len = max_len
         self.device = device
 
-        # --- Pre-compute the positional encoding matrix ---
-        # Shape: (max_len, d_model)
-        pe = torch.zeros(max_len, d_model, device=self.device)
+        try:
+            # Try to create directly on the target device
+            # --- Pre-compute the positional encoding matrix ---
+            # Shape: (max_len, d_model)
+            pe = torch.zeros(max_len, d_model, device=self.device)
 
-        # Position indices: (max_len, 1)
-        position = torch.arange(
-            0, max_len, dtype=torch.float, device=self.device
-        ).unsqueeze(1)
+            # Position indices: (max_len, 1)
+            position = torch.arange(
+                0, max_len, dtype=torch.float, device=self.device
+            ).unsqueeze(1)
 
-        # Calculate the division term: (d_model / 2)
-        # Formula: 1 / (10000^(2i / d_model)) -> log space -> exp(- (2i / d_model) * log(10000))
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float, device=self.device)
-            * (-math.log(10000.0) / d_model)
-        )
+            # Calculate the division term: (d_model / 2)
+            # Formula: 1 / (10000^(2i / d_model)) -> log space -> exp(- (2i / d_model) * log(10000))
+            div_term = torch.exp(
+                torch.arange(0, d_model, 2, dtype=torch.float, device=self.device)
+                * (-math.log(10000.0) / d_model)
+            )
+        except RuntimeError as e:
+            # If device creation fails, create on CPU and move later
+            print(f"Warning: Could not create positional encoding on {device}: {e}")
+            print("Creating on CPU and moving to target device")
+            
+            pe = torch.zeros(max_len, d_model)
+            position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(
+                torch.arange(0, d_model, 2, dtype=torch.float)
+                * (-math.log(10000.0) / d_model)
+            )
 
         # Calculate sine for even indices and cosine for odd indices
         pe[:, 0::2] = torch.sin(position * div_term)  # Apply to even columns
@@ -217,7 +252,9 @@ class PositionalEncoding(nn.Module):
         # Register 'pe' as a buffer. Buffers are model state like parameters,
         # but are not updated by the optimizer. They are saved with the model
         # and moved to the correct device automatically with .to(device).
-        self.register_buffer("pe", pe)
+        # Ensure it's on the target device
+        self.register_buffer("pe", pe.to(self.device))
+        
         print(
             f"PositionalEncoding: Pre-computed 'pe' buffer with shape {self.pe.shape}"
         )
@@ -245,6 +282,11 @@ class PositionalEncoding(nn.Module):
                 f"sequence length ({self.max_len}) this PositionalEncoding "
                 f"was initialized with."
             )
+
+        # Ensure the PE buffer is on the same device as the input
+        if self.pe.device != x.device:
+            print(f"Moving positional encoding from {self.pe.device} to {x.device}")
+            self.pe = self.pe.to(x.device)
 
         # Add the pre-computed positional encoding.
         # We take only the first 'seq_len' positions from the pre-computed matrix.
@@ -1145,21 +1187,67 @@ class Transformer(nn.Module):
         Returns:
             Transformer instance
         """
-        # Create encoder, decoder, and projection layer
-        encoder = Encoder.from_config(config)
-        decoder = Decoder.from_config(config)
-        projection_layer = ProjectionLayer(
-            d_model=config['d_model'],
-            vocab_size=config['target_vocab_size'],
-            device=config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        )
+        # Ensure device is set in config
+        if 'device' not in config:
+            config['device'] = get_device_config()
         
-        # Create and return transformer
-        return cls(
-            encoder=encoder,
-            decoder=decoder,
-            projection_layer=projection_layer
-        )
+        device = config['device']
+        print(f"Creating transformer components on device: {device}")
+        
+        try:
+            # Create encoder, decoder, and projection layer
+            encoder = Encoder.from_config(config)
+            decoder = Decoder.from_config(config)
+            projection_layer = ProjectionLayer(
+                d_model=config['d_model'],
+                vocab_size=config['target_vocab_size'],
+                device=device
+            )
+            
+            # Create and return transformer
+            transformer = cls(
+                encoder=encoder,
+                decoder=decoder,
+                projection_layer=projection_layer
+            )
+            
+            # Ensure transformer is on the right device
+            return transformer.to(device)
+        
+        except RuntimeError as e:
+            print(f"Error creating transformer on {device}: {e}")
+            print("Trying to create transformer on CPU and move to target device")
+            
+            # Save original device
+            original_device = config['device']
+            
+            # Temporarily set device to CPU
+            config['device'] = torch.device('cpu')
+            
+            # Create components on CPU
+            encoder = Encoder.from_config(config)
+            decoder = Decoder.from_config(config)
+            projection_layer = ProjectionLayer(
+                d_model=config['d_model'],
+                vocab_size=config['target_vocab_size'],
+                device=torch.device('cpu')
+            )
+            
+            # Create transformer
+            transformer = cls(
+                encoder=encoder,
+                decoder=decoder,
+                projection_layer=projection_layer
+            )
+            
+            # Try to move to original device
+            try:
+                print(f"Moving transformer to {original_device}")
+                return transformer.to(original_device)
+            except Exception as e2:
+                print(f"Failed to move to {original_device}: {e2}")
+                print("Keeping transformer on CPU")
+                return transformer
 
     def forward(
         self, 
@@ -1268,7 +1356,7 @@ class Transformer(nn.Module):
         return target_ids
 
 
-def create_transformer(config: dict) -> Transformer:
+def create_transformer(config=None) -> Transformer:
     """
     Create a complete transformer model from a configuration dictionary.
     
@@ -1276,26 +1364,17 @@ def create_transformer(config: dict) -> Transformer:
     into a complete transformer model.
     
     Args:
-        config: Configuration dictionary with model parameters
-        
-    Required config keys:
-        - d_model: Model dimension
-        - num_heads: Number of attention heads
-        - dropout: Dropout rate
-        - d_ff: Feed-forward dimension
-        - target_vocab_size: Target vocabulary size
-        - tokenizer_name: Name of tokenizer to use
-        - max_len_pe: Maximum sequence length for positional encoding
-        
-    Optional config keys:
-        - n_encoder_layers: Number of encoder layers (default 6)
-        - n_decoder_layers: Number of decoder layers (default 6)
-        - device: Device to place model on
-        - max_length: Maximum sequence length for input embedding
+        config: Configuration dictionary with model parameters. If None, will use
+               the default configuration from config.py.
         
     Returns:
         Assembled Transformer model
     """
+    # If no config provided, get default from config.py
+    if config is None:
+        from config import get_config
+        config = get_config()
+    
     # Prepare and validate configuration
     config = _prepare_config(config)
     
@@ -1308,10 +1387,28 @@ def create_transformer(config: dict) -> Transformer:
 
 def _prepare_config(config: dict) -> dict:
     """Validates and prepares configuration with defaults."""
-    # Required configuration parameters
+    # Make a copy to avoid modifying the original
+    config = config.copy()
+    
+    # Set up device using the centralized function
+    config['device'] = get_device_config()
+    
+    # Set defaults for optional parameters
+    config.setdefault('n_encoder_layers', 6)
+    config.setdefault('n_decoder_layers', 6)
+    config.setdefault('max_len_pe', 512)  # Default max length for positional encoding
+    
+    # Get tokenizer and set target_vocab_size if not provided
+    if 'target_vocab_size' not in config and 'tokenizer_name' in config:
+        tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_name'])
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        config['target_vocab_size'] = len(tokenizer)
+    
+    # Check for required parameters after setting defaults
     required_keys = [
         'd_model', 'num_heads', 'dropout', 'd_ff', 
-        'target_vocab_size', 'tokenizer_name', 'max_len_pe'
+        'tokenizer_name'
     ]
     
     # Validate required parameters
@@ -1319,81 +1416,19 @@ def _prepare_config(config: dict) -> dict:
         if key not in config:
             raise ValueError(f"Missing required configuration parameter: {key}")
     
-    # Make a copy to avoid modifying the original
-    config = config.copy()
-    
-    # Set up device
-    device_value = config.get('device')
-    if device_value is None:
-        # Default device if none provided
-        config['device'] = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    elif isinstance(device_value, str):
-        # Convert string to torch.device
-        config['device'] = torch.device(device_value)
-    else:
-        # Already a torch.device
-        config['device'] = device_value
-    
-    # Set defaults for optional parameters
-    config.setdefault('n_encoder_layers', 6)
-    config.setdefault('n_decoder_layers', 6)
-    
     print(f"Creating transformer on device: {config['device']}")
     return config
 
 
-def create_default_transformer_config(
-    d_model: int = 512,
-    num_heads: int = 8, 
-    dropout: float = 0.1,
-    d_ff: int = 2048,
-    target_vocab_size: int = 32000,
-    tokenizer_name: str = "bert-base-uncased",
-    max_len_pe: int = 512,
-    n_encoder_layers: int = 6,
-    n_decoder_layers: int = 6,
-    device: Optional[Union[str, torch.device]] = None
-) -> dict:
-    """
-    Create a default configuration for a transformer model.
-    
-    Args:
-        d_model: Model dimension
-        num_heads: Number of attention heads
-        dropout: Dropout rate
-        d_ff: Feed-forward dimension (usually 4x d_model)
-        target_vocab_size: Target vocabulary size
-        tokenizer_name: Name of tokenizer to use
-        max_len_pe: Maximum sequence length for positional encoding
-        n_encoder_layers: Number of encoder layers
-        n_decoder_layers: Number of decoder layers
-        device: Device to place model on
-        
-    Returns:
-        Configuration dictionary
-    """
-    return {
-        "d_model": d_model,
-        "num_heads": num_heads,
-        "dropout": dropout,
-        "d_ff": d_ff,
-        "target_vocab_size": target_vocab_size,
-        "tokenizer_name": tokenizer_name,
-        "max_len_pe": max_len_pe,
-        "n_encoder_layers": n_encoder_layers,
-        "n_decoder_layers": n_decoder_layers,
-        "device": device
-    }
-
-
 if __name__ == "__main__":
     # Create a transformer with default configuration
-    config = create_default_transformer_config()
-    transformer = create_transformer(config)
+    transformer = create_transformer()
+    device = get_device_config()
 
     # Test with some example data
     input_texts = ["Hello, world!", "This is a test."]
     target_token_ids = torch.randint(0, 32000, (len(input_texts), 10))
+    target_token_ids = target_token_ids.to(device)  # Move to the correct device
     
     # Run forward pass
     logits, self_attn_weights, cross_attn_weights = transformer(
@@ -1404,3 +1439,4 @@ if __name__ == "__main__":
     print(f"Output logits shape: {logits.shape}")
     print(f"Self-attention weights shape: {self_attn_weights.shape if self_attn_weights is not None else None}")
     print(f"Cross-attention weights shape: {cross_attn_weights.shape if cross_attn_weights is not None else None}")
+    print("Test successful!")

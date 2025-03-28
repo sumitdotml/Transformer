@@ -6,9 +6,19 @@ import torch
 import math
 from typing import List, Tuple, Optional
 from model import Transformer, Encoder, Decoder, ProjectionLayer, InputEmbedding, PositionalEncoding # Import all needed
+from config import get_device_config
 
-# Define test device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Try to use the configured device, but fall back to CPU if there are issues
+try:
+    device = get_device_config()
+    # Test device with a small operation to ensure it's working
+    test_tensor = torch.zeros(1, device=device)
+    test_tensor = test_tensor + 1
+except Exception as e:
+    print(f"Error initializing device: {e}")
+    print("Forcing CPU device for testing")
+    device = torch.device("cpu")
+
 print(f"--- Testing on device: {device} ---")
 
 # --- Test Configuration ---
@@ -20,7 +30,8 @@ TEST_CONFIG = {
     "tokenizer_name": "bert-base-uncased", # For Encoder's InputEmbedding
     "max_len_pe": 512,
     "target_vocab_size": 10000, # Example target vocab size
-    "max_length": None # InputEmbedding padding behavior
+    "max_length": None, # InputEmbedding padding behavior
+    "device": device  # Explicitly add device to config
 }
 NUM_ENC_LAYERS = 2 # Fewer layers for faster tests
 NUM_DEC_LAYERS = 2
@@ -43,13 +54,13 @@ def run_transformer(transformer_model, src_texts, tgt_tokens, return_weights=Fal
 def test_transformer_forward_shape():
     print("\n--- Test 1: Full Transformer Forward Pass & Shape Check ---")
     # Initialize full model
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
-    decoder = Decoder(
-        target_vocab_size=TEST_CONFIG["target_vocab_size"],
-        d_model=TEST_CONFIG["d_model"], n_layers=NUM_DEC_LAYERS,
-        num_heads=TEST_CONFIG["num_heads"], d_ff=TEST_CONFIG["d_ff"],
-        dropout=TEST_CONFIG["dropout"], max_len_pe=TEST_CONFIG["max_len_pe"], device=device
-    )
+    encoder = Encoder.from_config(TEST_CONFIG, n_layers=NUM_ENC_LAYERS)
+    
+    # Update decoder to use from_config method
+    test_config_decoder = TEST_CONFIG.copy()
+    test_config_decoder['n_decoder_layers'] = NUM_DEC_LAYERS
+    decoder = Decoder.from_config(test_config_decoder)
+    
     projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
     transformer = Transformer(encoder, decoder, projection).to(device)
 
@@ -69,8 +80,13 @@ def test_transformer_forward_shape():
 
 def test_transformer_batch_independence():
     print("\n--- Test 2: Transformer Batch Independence / Determinism ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
-    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    encoder = Encoder.from_config(TEST_CONFIG, n_layers=NUM_ENC_LAYERS)
+    
+    # Update decoder to use from_config method
+    test_config_decoder = TEST_CONFIG.copy()
+    test_config_decoder['n_decoder_layers'] = NUM_DEC_LAYERS  
+    decoder = Decoder.from_config(test_config_decoder)
+    
     projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
     transformer = Transformer(encoder, decoder, projection).to(device)
 
@@ -96,8 +112,13 @@ def test_encoder_padding_in_cross_attn():
     test_config_pad = TEST_CONFIG.copy()
     # test_config_pad["max_length"] = 15 # Force padding/truncation if needed
 
-    encoder = Encoder(config=test_config_pad, n_layers=NUM_ENC_LAYERS, device=device)
-    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    encoder = Encoder.from_config(test_config_pad, n_layers=NUM_ENC_LAYERS)
+    
+    # Update decoder to use from_config method
+    test_config_decoder = TEST_CONFIG.copy()
+    test_config_decoder['n_decoder_layers'] = NUM_DEC_LAYERS
+    decoder = Decoder.from_config(test_config_decoder)
+    
     projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
     transformer = Transformer(encoder, decoder, projection).to(device)
 
@@ -154,8 +175,13 @@ def test_encoder_padding_in_cross_attn():
 
 def test_causal_mask_effectiveness():
     print("\n--- Test 4: Causal Mask Effectiveness (Decoder Self-Attention) ---")
-    encoder = Encoder(config=TEST_CONFIG, n_layers=NUM_ENC_LAYERS, device=device)
-    decoder = Decoder(TEST_CONFIG["target_vocab_size"], TEST_CONFIG["d_model"], NUM_DEC_LAYERS, TEST_CONFIG["num_heads"], TEST_CONFIG["d_ff"], TEST_CONFIG["dropout"], TEST_CONFIG["max_len_pe"], device)
+    encoder = Encoder.from_config(TEST_CONFIG, n_layers=NUM_ENC_LAYERS)
+    
+    # Update decoder to use from_config method
+    test_config_decoder = TEST_CONFIG.copy()
+    test_config_decoder['n_decoder_layers'] = NUM_DEC_LAYERS
+    decoder = Decoder.from_config(test_config_decoder)
+    
     projection = ProjectionLayer(TEST_CONFIG["d_model"], TEST_CONFIG["target_vocab_size"], device)
     transformer = Transformer(encoder, decoder, projection).to(device)
 
@@ -207,8 +233,13 @@ def test_transformer_gradient_flow():
     print("\n--- Test 5: Transformer Gradient Flow Check ---")
     grad_config = TEST_CONFIG.copy()
     grad_config["dropout"] = 0.1 # Ensure dropout is non-zero
-    encoder = Encoder(config=grad_config, n_layers=NUM_ENC_LAYERS, device=device)
-    decoder = Decoder(grad_config["target_vocab_size"], grad_config["d_model"], NUM_DEC_LAYERS, grad_config["num_heads"], grad_config["d_ff"], grad_config["dropout"], grad_config["max_len_pe"], device)
+    encoder = Encoder.from_config(grad_config, n_layers=NUM_ENC_LAYERS)
+    
+    # Update decoder to use from_config method
+    test_config_decoder = grad_config.copy()
+    test_config_decoder['n_decoder_layers'] = NUM_DEC_LAYERS
+    decoder = Decoder.from_config(test_config_decoder)
+    
     projection = ProjectionLayer(grad_config["d_model"], grad_config["target_vocab_size"], device)
     transformer = Transformer(encoder, decoder, projection).to(device)
     transformer.train() # Set to training mode

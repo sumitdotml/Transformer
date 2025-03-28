@@ -5,8 +5,11 @@ import torch.nn.functional as F
 from typing import Optional, List
 from transformers import AutoTokenizer
 
-# Set default device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Import device configuration function
+from config import get_device_config
+
+# Set device using the centralized function
+device = get_device_config()
 
 class LayerNormalization(nn.Module):
     """
@@ -83,18 +86,17 @@ class MultiHeadAttentionBlock(nn.Module):
         key = self.w_k(k)    # (batch, seq_len, d_model)
         value = self.w_v(v)  # (batch, seq_len, d_model)
         
-        # Reshape for multi-head attention
+        # Reshaping for multi-head attention
         # (batch, seq_len, d_model) -> (batch, seq_len, h, d_k) -> (batch, h, seq_len, d_k)
         query = query.view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
         key = key.view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
         value = value.view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
         
-        # Apply attention
         x, self.attention_weights = MultiHeadAttentionBlock.attention(
             query, key, value, mask, self.dropout
         )
         
-        # Combine heads and project
+        # Combining heads and projecting
         # (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
         x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         
@@ -112,7 +114,7 @@ class ResidualConnection(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x, sublayer):
-        # Apply normalization first, then sublayer, then dropout, then add residual
+        # Applying normalization first, then sublayer, then dropout, then adding residual
         return x + self.dropout(sublayer(self.norm(x)))
 
 class EncoderBlock(nn.Module):
@@ -143,14 +145,26 @@ class Encoder(nn.Module):
     """
     def __init__(self, d_model: int, vocab_size: int, seq_len: int,
                  n_layers: int, h: int, d_ff: int, dropout: float, 
-                 tokenizer_name: str = "bert-base-uncased"):
+                 tokenizer_name: str = "bert-base-uncased",
+                 max_len_pe: int = None):
         super().__init__()
         
-        # Input embeddings
-        self.embedding = nn.Embedding(vocab_size, d_model)
+        # Determine appropriate device
+        self.device = device  # Use the centralized device configuration
+        
+        # Use provided max_len_pe or default to seq_len
+        max_len_pe = max_len_pe or seq_len
+        
+        # Input embeddings - wrap in try-except for robust device handling
+        try:
+            self.embedding = nn.Embedding(vocab_size, d_model, device=self.device)
+        except RuntimeError as e:
+            print(f"Warning: Could not create embedding directly on {self.device}: {e}")
+            print("Creating embedding on CPU and moving to target device")
+            self.embedding = nn.Embedding(vocab_size, d_model).to(self.device)
         
         # Positional encoding
-        self.positional_encoding = PositionalEncoding(d_model, seq_len, dropout)
+        self.positional_encoding = PositionalEncoding(d_model, max_len_pe, dropout)
         
         # Encoder blocks
         self.blocks = nn.ModuleList([
@@ -187,52 +201,58 @@ class Encoder(nn.Module):
         Returns:
             Encoder output and mask
         """
-        # Process raw text input if needed
+        # Processing raw text input if needed
         if isinstance(x, list) and isinstance(x[0], str):
             return self.forward_text(x)
+            
+        # Ensure input is on the correct device
+        if x.device != self.device:
+            x = x.to(self.device)
             
         # Token embeddings 
         x = self.embedding(x) * math.sqrt(self.embedding.embedding_dim)
         
-        # Add positional encoding
+        # Adding positional encoding
         x = self.positional_encoding(x)
         
-        # Apply encoder blocks
+        # Applying encoder blocks
         for block in self.blocks:
             x = block(x, mask)
             
-        # Apply final layer norm
+        # Applying final layer norm
         return self.norm(x), mask
     
     def forward_text(self, texts: List[str]):
         """Process raw text input"""
-        # Tokenize input texts
+        # Tokenizing input texts
         encoding = self.tokenizer(
             texts,
             padding="longest",
             truncation=True, 
-            return_tensors="pt",
-            return_attention_mask=True
-        ).to(device)
+            return_tensors="pt"
+        )
         
-        # Extract token IDs and attention mask
+        # Ensure encoded tensors are on the correct device
+        encoding = {k: v.to(self.device) for k, v in encoding.items()}
+        
+        # Extracting token IDs and attention mask
         input_ids = encoding["input_ids"]
         attention_mask = encoding["attention_mask"]
         
-        # Create padding mask for attention mechanism (1 for positions to attend, 0 for padding)
+        # Creating padding mask for attention mechanism (1 for positions to attend, 0 for padding)
         padding_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         
-        # Embed tokens
+        # Embedding tokens
         x = self.embedding(input_ids) * math.sqrt(self.embedding.embedding_dim)
         
-        # Add positional encoding
+        # Adding positional encoding
         x = self.positional_encoding(x)
         
-        # Apply encoder blocks
+        # Applying encoder blocks
         for block in self.blocks:
             x = block(x, padding_mask)
             
-        # Apply final layer norm
+        # Applying final layer norm
         return self.norm(x), padding_mask
 
 class DecoderBlock(nn.Module):
@@ -271,14 +291,27 @@ class Decoder(nn.Module):
     Full decoder stack with embedding and positional encoding
     """
     def __init__(self, d_model: int, vocab_size: int, seq_len: int,
-                 n_layers: int, h: int, d_ff: int, dropout: float):
+                 n_layers: int, h: int, d_ff: int, dropout: float,
+                 max_len_pe: int = None):
         super().__init__()
         
-        # Input embeddings
-        self.embedding = nn.Embedding(vocab_size, d_model)
+        # Determine appropriate device
+        self.device = device  # Use the centralized device configuration
+        
+        # Use provided max_len_pe or default to seq_len
+        max_len_pe = max_len_pe or seq_len
+        
+        # Input embeddings - wrap in try-except for robust device handling
+        try:
+            # Try to create embeddings directly on target device
+            self.embedding = nn.Embedding(vocab_size, d_model, device=self.device)
+        except RuntimeError as e:
+            print(f"Warning: Could not create decoder embedding directly on {self.device}: {e}")
+            print("Creating embedding on CPU and moving to target device")
+            self.embedding = nn.Embedding(vocab_size, d_model).to(self.device)
         
         # Positional encoding
-        self.positional_encoding = PositionalEncoding(d_model, seq_len, dropout)
+        self.positional_encoding = PositionalEncoding(d_model, max_len_pe, dropout)
         
         # Decoder blocks
         self.blocks = nn.ModuleList([
@@ -312,17 +345,27 @@ class Decoder(nn.Module):
         Returns:
             Decoder output
         """
+        # Ensure inputs are on the correct device
+        if x.device != self.device:
+            x = x.to(self.device)
+        if encoder_output.device != self.device:
+            encoder_output = encoder_output.to(self.device)
+        if src_mask is not None and src_mask.device != self.device:
+            src_mask = src_mask.to(self.device)
+        if tgt_mask is not None and tgt_mask.device != self.device:
+            tgt_mask = tgt_mask.to(self.device)
+            
         # Token embeddings
         x = self.embedding(x) * math.sqrt(self.embedding.embedding_dim)
         
-        # Add positional encoding
+        # Adding positional encoding
         x = self.positional_encoding(x)
         
-        # Apply decoder blocks
+        # Applying decoder blocks
         for block in self.blocks:
             x = block(x, encoder_output, src_mask, tgt_mask)
             
-        # Apply final layer norm
+        # Applying final layer norm
         return self.norm(x)
     
     def create_target_mask(self, tgt, padding_idx=0):
@@ -336,17 +379,21 @@ class Decoder(nn.Module):
         Returns:
             Combined mask for target (batch, 1, seq_len, seq_len)
         """
+        # Ensure input is on the correct device
+        if tgt.device != self.device:
+            tgt = tgt.to(self.device)
+            
         # Padding mask
         padding_mask = (tgt == padding_idx).unsqueeze(1).unsqueeze(2)
         
-        # Look-ahead mask
+        # Look-ahead mask - create on the same device as the input
         seq_len = tgt.size(1)
         look_ahead_mask = (1 - torch.triu(
             torch.ones(seq_len, seq_len, dtype=torch.uint8, device=tgt.device),
             diagonal=1
         )).unsqueeze(0).unsqueeze(0).bool()
         
-        # Combine masks
+        # Combining masks
         return padding_mask | ~look_ahead_mask
 
 class PositionalEncoding(nn.Module):
@@ -356,23 +403,33 @@ class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_seq_len: int, dropout: float):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
+        self.device = device  # Use the centralized device configuration
         
-        # Create positional encoding matrix
-        pe = torch.zeros(max_seq_len, d_model)
-        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        try:
+            # Try to create positional encoding on the target device
+            # Create positional encoding matrix
+            pe = torch.zeros(max_seq_len, d_model, device=self.device)
+            position = torch.arange(0, max_seq_len, dtype=torch.float, device=self.device).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float, device=self.device) * (-math.log(10000.0) / d_model))
+        except RuntimeError as e:
+            # Fall back to CPU if device creation fails
+            print(f"Warning: Could not create positional encoding on {self.device}: {e}")
+            print("Creating on CPU and moving to target device")
+            pe = torch.zeros(max_seq_len, d_model)
+            position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
         
-        # Apply sine to even indices
+        # Applying sine to even indices
         pe[:, 0::2] = torch.sin(position * div_term)
         
-        # Apply cosine to odd indices
+        # Applying cosine to odd indices
         pe[:, 1::2] = torch.cos(position * div_term)
         
-        # Add batch dimension
+        # Adding batch dimension
         pe = pe.unsqueeze(0)
         
-        # Register as buffer (not a model parameter)
-        self.register_buffer('pe', pe)
+        # Registering as buffer (not a model parameter)
+        self.register_buffer('pe', pe.to(self.device))
         
     def forward(self, x):
         """
@@ -384,6 +441,11 @@ class PositionalEncoding(nn.Module):
         Returns:
             Embeddings with positional information
         """
+        # Ensure PE buffer is on the same device as the input
+        if self.pe.device != x.device:
+            print(f"Moving positional encoding from {self.pe.device} to {x.device}")
+            self.pe = self.pe.to(x.device)
+            
         x = x + self.pe[:, :x.size(1), :].requires_grad_(False)
         return self.dropout(x)
 
@@ -393,7 +455,15 @@ class ProjectionLayer(nn.Module):
     """
     def __init__(self, d_model: int, vocab_size: int):
         super().__init__()
-        self.proj = nn.Linear(d_model, vocab_size)
+        self.device = device  # Use the centralized device configuration
+        
+        # Try to create projection layer on the target device
+        try:
+            self.proj = nn.Linear(d_model, vocab_size, device=self.device)
+        except RuntimeError as e:
+            print(f"Warning: Could not create projection layer directly on {self.device}: {e}")
+            print("Creating projection layer on CPU and moving to target device")
+            self.proj = nn.Linear(d_model, vocab_size).to(self.device)
         
     def forward(self, x):
         """
@@ -405,6 +475,10 @@ class ProjectionLayer(nn.Module):
         Returns:
             Logits (batch, seq_len, vocab_size)
         """
+        # Ensure input is on the correct device
+        if x.device != self.device:
+            x = x.to(self.device)
+            
         # (batch, seq_len, d_model) -> (batch, seq_len, vocab_size)
         logits = self.proj(x)
         return F.log_softmax(logits, dim=-1)
@@ -418,6 +492,8 @@ class Transformer(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.projection = projection
+        # Ensure consistent device handling
+        self.device = device
         
     def forward(self, src, tgt, src_mask=None, tgt_mask=None):
         """
@@ -432,17 +508,21 @@ class Transformer(nn.Module):
         Returns:
             Output logits
         """
-        # Create target mask if not provided
+        # Ensure target is on the correct device
+        if isinstance(tgt, torch.Tensor) and tgt.device != self.device:
+            tgt = tgt.to(self.device)
+            
+        # Creating target mask if not provided
         if tgt_mask is None:
             tgt_mask = self.decoder.create_target_mask(tgt)
             
-        # Encode the source
+        # Encoding the source
         encoder_output, src_mask = self.encoder(src, src_mask)
         
-        # Decode with target and encoder output
+        # Decoding with target and encoder output
         decoder_output = self.decoder(tgt, encoder_output, src_mask, tgt_mask)
         
-        # Project to vocabulary
+        # Projecting to vocabulary
         return self.projection(decoder_output)
     
     @torch.no_grad()
@@ -459,152 +539,295 @@ class Transformer(nn.Module):
         Returns:
             Generated sequence
         """
-        # Encode the source
+        # Encoding the source
         encoder_output, src_mask = self.encoder(src, None)
         
         batch_size = encoder_output.size(0)
-        device = encoder_output.device
         
-        # Initialize target with start symbol
-        ys = torch.ones(batch_size, 1).fill_(start_symbol).long().to(device)
+        # Initializing target with start symbol - ensure correct device
+        ys = torch.ones(batch_size, 1).fill_(start_symbol).long().to(self.device)
         
-        # Generate tokens one by one
+        # Generating tokens one by one
         for i in range(max_len-1):
-            # Create mask for target
+            # Creating mask for target
             tgt_mask = self.decoder.create_target_mask(ys)
             
-            # Decode current sequence
+            # Decoding current sequence
             decoder_output = self.decoder(ys, encoder_output, src_mask, tgt_mask)
             
-            # Get next token (last position only)
+            # Getting next token (last position only)
             logits = self.projection(decoder_output)
             next_word = logits[:, -1].argmax(dim=-1, keepdim=True)
             
-            # Append to target sequence
+            # Appending to target sequence
             ys = torch.cat([ys, next_word], dim=1)
             
-            # Stop if all sequences have end token
+            # Stopping if all sequences have end token
             if (next_word == end_symbol).all():
                 break
                 
         return ys
 
-def build_transformer(
-    src_vocab_size: int, 
-    tgt_vocab_size: int, 
-    src_seq_len: int, 
-    tgt_seq_len: int, 
-    d_model: int = 512, 
-    n_layers: int = 6, 
-    n_heads: int = 8,
-    d_ff: int = 2048, 
-    dropout: float = 0.1,
-    tokenizer_name: str = "bert-base-uncased"
-) -> Transformer:
+def get_language_tokenizer(config):
     """
-    Build a complete Transformer model
-    
-    Args:
-        src_vocab_size: Source vocabulary size
-        tgt_vocab_size: Target vocabulary size
-        src_seq_len: Source sequence length
-        tgt_seq_len: Target sequence length
-        d_model: Model dimension
-        n_layers: Number of encoder/decoder layers
-        n_heads: Number of attention heads
-        d_ff: Feed-forward dimension
-        dropout: Dropout rate
-        tokenizer_name: Name of tokenizer to use
-        
-    Returns:
-        Transformer model
-    """
-    # Build encoder
-    encoder = Encoder(
-        d_model=d_model,
-        vocab_size=src_vocab_size,
-        seq_len=src_seq_len,
-        n_layers=n_layers,
-        h=n_heads,
-        d_ff=d_ff,
-        dropout=dropout,
-        tokenizer_name=tokenizer_name
-    )
-    
-    # Build decoder
-    decoder = Decoder(
-        d_model=d_model,
-        vocab_size=tgt_vocab_size,
-        seq_len=tgt_seq_len,
-        n_layers=n_layers,
-        h=n_heads,
-        d_ff=d_ff,
-        dropout=dropout
-    )
-    
-    # Build projection layer
-    projection = ProjectionLayer(d_model, tgt_vocab_size)
-    
-    # Build transformer
-    transformer = Transformer(encoder, decoder, projection)
-    
-    # Initialize parameters
-    for p in transformer.parameters():
-        if p.dim() > 1:
-            nn.init.xavier_uniform_(p)
-            
-    return transformer
-
-def build_transformer_from_config(config):
-    """
-    Build a transformer model from a configuration dictionary
+    Get the appropriate tokenizer for the language pair specified in config.
+    Prioritizes language-specific tokenizer if specified in config.
     
     Args:
         config: Configuration dictionary
         
     Returns:
+        tokenizer: HuggingFace tokenizer appropriate for the language pair
+    """
+    # Get the default tokenizer name from config
+    default_tokenizer_name = config["tokenizer_name"]
+    tokenizer_name = default_tokenizer_name
+    fallback_tokenizer_name = None
+    second_fallback_tokenizer_name = "google/byt5-small"  # Universal fallback that works with any language
+    
+    # Check if there's a language-specific tokenizer
+    lang_pair = config.get("lang_pair", "en-ja")  # Default to en-ja
+    if lang_pair in config["language_pairs"]:
+        lang_config = config["language_pairs"][lang_pair]
+        # Use language-specific tokenizer if specified
+        if "tokenizer_name" in lang_config:
+            tokenizer_name = lang_config["tokenizer_name"]
+            print(f"Using language-specific tokenizer for {lang_pair}: {tokenizer_name}")
+            
+            # Also get language-specific fallback tokenizer if available
+            if "fallback_tokenizer_name" in lang_config:
+                fallback_tokenizer_name = lang_config["fallback_tokenizer_name"]
+                
+            # Get second fallback tokenizer if available
+            if "second_fallback_tokenizer_name" in lang_config:
+                second_fallback_tokenizer_name = lang_config["second_fallback_tokenizer_name"]
+    
+    # For Japanese, use special handling to ensure proper tokenization
+    if lang_pair == "en-ja" or lang_pair == "ja-en":
+        try:
+            # Try the Japanese character-based tokenizer first (lighter dependencies)
+            print("Attempting to load Japanese character-based tokenizer...")
+            tokenizer = AutoTokenizer.from_pretrained('cl-tohoku/bert-base-japanese-char')
+            print("Successfully loaded Japanese character-based tokenizer")
+            if tokenizer.pad_token is None:
+                tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+            return tokenizer
+        except Exception as e:
+            print(f"Error loading Japanese character tokenizer: {e}")
+            try:
+                # Try the Japanese word-based tokenizer next
+                print("Attempting to load Japanese word-based tokenizer...")
+                tokenizer = AutoTokenizer.from_pretrained('cl-tohoku/bert-base-japanese')
+                print("Successfully loaded Japanese word-based tokenizer")
+                if tokenizer.pad_token is None:
+                    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+                return tokenizer
+            except Exception as e2:
+                print(f"Error loading Japanese word tokenizer: {e2}")
+                print("Falling back to specified tokenizers...")
+    
+    # Try to load the selected tokenizer
+    try:
+        # Load the tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        return tokenizer
+    except Exception as e:
+        # If we have a language-specific fallback tokenizer, try that next
+        if fallback_tokenizer_name:
+            print(f"Error loading primary language-specific tokenizer '{tokenizer_name}': {e}")
+            print(f"Trying first fallback tokenizer: {fallback_tokenizer_name}")
+            
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(fallback_tokenizer_name)
+                if tokenizer.pad_token is None:
+                    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+                return tokenizer
+            except Exception as e2:
+                print(f"Error loading first fallback tokenizer: {e2}")
+                print(f"Trying second fallback tokenizer: {second_fallback_tokenizer_name}")
+                
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(second_fallback_tokenizer_name)
+                    if tokenizer.pad_token is None:
+                        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+                    return tokenizer
+                except Exception as e3:
+                    print(f"Error loading second fallback tokenizer: {e3}")
+                    print(f"Falling back to default tokenizer: {default_tokenizer_name}")
+        else:
+            # If there's no fallback tokenizer and we were using a language-specific tokenizer
+            if tokenizer_name != default_tokenizer_name:
+                print(f"Error loading language-specific tokenizer '{tokenizer_name}': {e}")
+                print(f"Trying universal fallback tokenizer: {second_fallback_tokenizer_name}")
+                
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(second_fallback_tokenizer_name)
+                    if tokenizer.pad_token is None:
+                        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+                    return tokenizer
+                except Exception as e2:
+                    print(f"Error loading universal fallback tokenizer: {e2}")
+                    print(f"Falling back to default tokenizer: {default_tokenizer_name}")
+        
+        # As a last resort, load the default tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(default_tokenizer_name)
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        return tokenizer
+
+def build_transformer(config=None):
+    """
+    Build a transformer model from a configuration dictionary
+    
+    Args:
+        config: Configuration dictionary, if None will use default from config.py
+        
+    Returns:
         Transformer model
     """
-    # Get tokenizer to determine vocab size
-    tokenizer = AutoTokenizer.from_pretrained(config["tokenizer_name"])
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-    vocab_size = len(tokenizer)
+    # If no config provided, get default from config.py
+    if config is None:
+        from config import get_config
+        config = get_config()
     
-    return build_transformer(
-        src_vocab_size=vocab_size,
-        tgt_vocab_size=vocab_size,
-        src_seq_len=config["max_seq_len"],
-        tgt_seq_len=config["max_seq_len"],
-        d_model=config["d_model"],
-        n_layers=config["num_layers"],
-        n_heads=config["num_heads"],
-        d_ff=config["d_ff"],
-        dropout=config["dropout"],
-        tokenizer_name=config["tokenizer_name"]
-    )
+    # Ensure device is explicitly set in config
+    if 'device' not in config:
+        config['device'] = get_device_config()
+        
+    # Use the configured device
+    target_device = config['device']
+    print(f"Building transformer for device: {target_device}")
+    
+    try:
+        # Getting language-specific tokenizer to determine vocab size
+        tokenizer = get_language_tokenizer(config)
+        vocab_size = len(tokenizer)
+        
+        # Get max_len for positional encoding - default to max_seq_len if not specified
+        max_len_pe = config.get("max_len_pe", config["max_seq_len"])
+    
+        # Building encoder
+        encoder = Encoder(
+            d_model=config["d_model"],
+            vocab_size=vocab_size,
+            seq_len=config["max_seq_len"],
+            n_layers=config["num_layers"],
+            h=config["num_heads"],
+            d_ff=config["d_ff"],
+            dropout=config["dropout"],
+            tokenizer_name=tokenizer.name_or_path,  # Use actual tokenizer name
+            max_len_pe=max_len_pe
+        )
+        
+        # Building decoder
+        decoder = Decoder(
+            d_model=config["d_model"],
+            vocab_size=vocab_size,
+            seq_len=config["max_seq_len"],
+            n_layers=config["num_layers"],
+            h=config["num_heads"],
+            d_ff=config["d_ff"],
+            dropout=config["dropout"],
+            max_len_pe=max_len_pe
+        )
+        
+        # Building projection layer
+        projection = ProjectionLayer(config["d_model"], vocab_size)
+        
+        # Building transformer
+        transformer = Transformer(encoder, decoder, projection)
+        
+        # Initializing parameters
+        for p in transformer.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        
+        # Move model to the configured device
+        return transformer.to(target_device)
+    except Exception as e:
+        print(f"Error building transformer on {target_device}: {e}")
+        print("Attempting to build on CPU and then move to target device")
+        
+        # Try building on CPU first
+        cpu_device = torch.device('cpu')
+        
+        # Getting tokenizer to determine vocab size
+        tokenizer = get_language_tokenizer(config)
+        vocab_size = len(tokenizer)
+        
+        # Get max_len for positional encoding - default to max_seq_len if not specified
+        max_len_pe = config.get("max_len_pe", config["max_seq_len"])
+        
+        # Force CPU device temporarily
+        old_device = device
+        globals()['device'] = cpu_device
+        
+        # Building encoder on CPU
+        encoder = Encoder(
+            d_model=config["d_model"],
+            vocab_size=vocab_size,
+            seq_len=config["max_seq_len"],
+            n_layers=config["num_layers"],
+            h=config["num_heads"],
+            d_ff=config["d_ff"],
+            dropout=config["dropout"],
+            tokenizer_name=tokenizer.name_or_path,
+            max_len_pe=max_len_pe
+        )
+        
+        # Building decoder on CPU
+        decoder = Decoder(
+            d_model=config["d_model"],
+            vocab_size=vocab_size,
+            seq_len=config["max_seq_len"],
+            n_layers=config["num_layers"],
+            h=config["num_heads"],
+            d_ff=config["d_ff"],
+            dropout=config["dropout"],
+            max_len_pe=max_len_pe
+        )
+        
+        # Building projection layer on CPU
+        projection = ProjectionLayer(config["d_model"], vocab_size)
+        
+        # Building transformer on CPU
+        transformer = Transformer(encoder, decoder, projection)
+        
+        # Initializing parameters
+        for p in transformer.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        
+        # Restore original device
+        globals()['device'] = old_device
+        
+        # Try to move to target device
+        try:
+            print(f"Moving transformer from CPU to {target_device}")
+            return transformer.to(target_device)
+        except Exception as e2:
+            print(f"Failed to move to {target_device}: {e2}")
+            print("Keeping transformer on CPU")
+            return transformer
 
 if __name__ == "__main__":
-    # Import configuration
-    from config import get_config
+    # Building model
+    model = build_transformer()
+    device = get_device_config()
     
-    # Get default config
-    config = get_config()
-    
-    # Build model
-    model = build_transformer_from_config(config)
-    
-    # Test with some example data
+    # Testing with some example data
     src_texts = ["Hello, world!", "This is a test."]
     tgt_tokens = torch.ones(2, 5).long() * 101  # Example target tokens
+    tgt_tokens = tgt_tokens.to(device)  # Move to the correct device
     
-    # Run forward pass
+    # Running forward pass
     output = model(src_texts, tgt_tokens)
     
-    # Generate sequence
+    # Generating sequence
     generated = model.generate(src_texts)
     
-    # Print shapes
     print(f"Output shape: {output.shape}")
     print(f"Generated shape: {generated.shape}")
     print("Test successful!") 

@@ -3,7 +3,7 @@ from pathlib import Path
 def get_config():
     """
     Returns default configuration parameters for the transformer model.
-    Feel free to adjust these values for your specific needs.
+    This is where we can adjust these values for our specific needs.
     """
     return {
         # Model architecture
@@ -12,22 +12,41 @@ def get_config():
         "num_layers": 6,       # Number of encoder/decoder layers
         "d_ff": 2048,          # Feed-forward dimension
         "dropout": 0.1,        # Dropout rate
-        
-        # Sequence parameters
         "max_seq_len": 512,    # Maximum sequence length
-        
-        # Tokenizer
         "tokenizer_name": "bert-base-uncased",  # Default tokenizer
         
         # Training
         "batch_size": 8,
         "num_epochs": 20,
         "learning_rate": 1e-4,
+        "patience": 5,         # Early stopping patience
+        "clip_grad": 1.0,      # Gradient clipping value
+        "num_workers": 2,      # Data loader workers
         
         # Model saving
-        "model_folder": "weights",
+        "model_folder": "transformer/weights",
         "model_basename": "transformer_",
-        "preload": "latest"
+        "preload": "latest",
+        "demo_dir": "transformer/demo",
+        "demo_basename": "transformer_demo_",
+        
+        # Language-specific configurations
+        "language_pairs": {
+            "en-ja": {
+                "num_epochs": 20,
+                "batch_size": 16,
+                "learning_rate": 1e-4,
+                "dropout": 0.2,
+                "patience": 5,
+                "tokenizer_name": "cl-tohoku/bert-base-japanese-char",  # Character-based Japanese tokenizer (no extra dependencies)
+                "fallback_tokenizer_name": "cl-tohoku/bert-base-japanese",  # MeCab-based tokenizer (requires fugashi)
+                "second_fallback_tokenizer_name": "google/byt5-small"  # Universal tokenizer that works with any language
+            }
+        },
+        
+        # Device configuration
+        "use_cuda": True,      # Use CUDA if available
+        "use_mps": True        # Use MPS if available (for Apple Silicon)
     }
 
 def get_weights_file_path(config, epoch: str):
@@ -44,4 +63,29 @@ def latest_weights_file_path(config):
     if len(weights_files) == 0:
         return None
     weights_files.sort()
-    return str(weights_files[-1]) 
+    return str(weights_files[-1])
+
+def get_device_config():
+    """Get the appropriate device based on availability and configuration"""
+    import torch
+    
+    # Default configuration
+    config = get_config()
+    
+    # First trying CUDA
+    if config["use_cuda"] and torch.cuda.is_available():
+        return torch.device("cuda")
+    
+    # Then trying MPS (Apple Silicon GPU)
+    elif config["use_mps"] and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            # Creating a small test tensor to verify MPS is working properly
+            test_tensor = torch.zeros(1, device="mps")
+            test_tensor = test_tensor + 1  # Simple operation to test device
+            return torch.device("mps")
+        except Exception as e:
+            return torch.device("cpu")
+    
+    # Fallback to CPU
+    else:
+        return torch.device("cpu") 
